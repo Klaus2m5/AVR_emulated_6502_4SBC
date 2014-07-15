@@ -1,0 +1,104 @@
+        bss
+        org 0
+lastpat ds  128
+pattern ds  1        
+        code        
+        org $1000
+        jmp start
+back    lda #$30
+        sta $bfd2
+        jsr ldelay
+        lda #$30
+        sta $bfd2
+        ldx #50
+        jsr delay1
+        lda #$30
+        sta $bfd2
+;        jsr delay
+        lda #$30
+        sta $bfd0
+;        jsr delay
+        lda #$38
+        sta $bfd0
+;        jsr delay
+        lda #$08
+        sta $bfd0
+;        jsr ldelay
+        lda #$01
+        sta $bfd0
+;        jsr ldelay
+        lda #$06
+        sta $bfd0
+;        jsr delay
+start
+        lda #$0c
+        sta $bfd0
+;        jsr delay
+        lda #'A'
+        sta pattern
+loop3   ldy #0
+;        jsr delay
+        lda #$80                ;set cursor 0
+        sta $bfd0
+;        jsr delay
+        lda pattern
+loop    sta $bfd1
+        sta lastpat,y
+;        jsr delay
+        inc pattern
+        lda pattern
+        cmp #'Z'+1
+        bne not_z
+        lda #'A'
+        sta pattern
+not_z   iny
+        cpy #40
+        bne l1end
+        lda #$c0                ;set cursor 2nd line
+        sta $bfd0
+;        jsr delay
+        lda pattern
+l1end   cpy #80
+        bne loop
+        ldy #0
+;        jsr delay
+        lda #$80                ;set cursor 0
+        sta $bfd0
+;        jsr delay
+
+;        lda $bfd3               ;skip 1st
+;        jsr delay
+
+;        ldy #0
+;        lda #$80                ;set cursor 0 again
+;        sta $bfd2
+;        jsr delay
+        
+loop1   lda $bfd1               ;readback
+;        jsr delay
+        cmp lastpat,y
+        bne *                   ;mismatch
+        iny
+        cpy #40
+        bne l1end1
+        lda #$c0                ;set cursor 2nd line
+        sta $bfd0
+;        jsr delay
+l1end1  cpy #80
+        bne loop1
+        beq loop3
+                
+        
+delay   ldx #25     ;~50µs delay
+delay1  dex
+        bne delay1
+        rts  
+        
+ldelay  ldx #10     ;~5ms delay
+ldelay1 ldy #250    ;~500µs delay inner loop
+ldelay2 dey
+        bne ldelay2
+        dex
+        bne ldelay1
+        rts
+        

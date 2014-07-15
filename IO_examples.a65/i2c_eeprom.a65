@@ -1,0 +1,142 @@
+        bss
+iomap   equ $bf00
+i2c_cmd equ iomap+$f2
+i2c_sta equ iomap+$f2
+i2c_dat equ iomap+$f3
+timer   equ iomap+$ff 
+eep_adr equ $a0
+
+        org 0
+cur_adr     ds  2       ;current address in EEPROM
+seed        ds  1       ;test pattern seed & modifier
+modifier    ds  1
+toggle      ds  1
+        org $200
+read        ds  128     ;readback pattern
+pattern     ds  128     ;generated pattern
+
+              
+        code
+
+i2c_start   macro       ;\1 = address
+        local start_wack
+start_wack
+        lda #2          ;start 400 kHz
+        sta i2c_cmd
+        lda #\1         ;send address
+        sta i2c_dat
+        lda i2c_sta     ;test ack
+        and #$40
+        beq start_wack ;loop on nak - no timeout
+        endm
+
+i2c_stop    macro
+        lda #0          ;stop
+        sta i2c_cmd
+        endm
+
+stop_debug   macro
+        db  $db         ;uses 65c02 stop instruction, exception trap on 6502
+        endm
+
+        org $1000
+
+        jsr reset_seed
+write128
+        jsr gen_pattern
+        i2c_start eep_adr ;write eep
+        lda cur_adr+1   ;send address high
+        sta i2c_dat
+        lda cur_adr     ;send address low
+        sta i2c_dat
+        ldx #127
+write1
+        lda pattern,x   ;write pattern
+        sta i2c_dat
+        dex
+        bpl write1
+        i2c_stop
+        lda cur_adr     ;address = next 128
+        clc
+        adc #128        
+        sta cur_adr
+        bcc write128
+        inc cur_adr+1
+        bne write128
+
+readall
+        jsr reset_seed
+read128
+        jsr gen_pattern
+        i2c_start eep_adr ;write eep address
+        lda cur_adr+1   ;write address high
+        sta i2c_dat
+        lda cur_adr     ;write address low
+        sta i2c_dat
+        i2c_start eep_adr+1 ;rep. start read
+        ldx #127
+read1
+        lda i2c_dat
+        sta read,x
+        dex
+        bpl read1
+        i2c_stop
+        ldx #127
+verify1 
+        lda pattern,x
+        cmp read,x
+        bne *           ;trap for miscompare
+        dex
+        bpl verify1
+        lda cur_adr     ;address = next 128
+        clc
+        adc #128
+        sta cur_adr
+        bcc read128
+        inc cur_adr+1
+        bne read128
+        jmp readall     ;loop indefinitely
+
+reset_seed
+        lda #0
+        ldx #4
+rs_seed sta cur_adr,x   ;reset seed & current address
+        dex
+        bpl rs_seed
+        rts
+
+gen_pattern                 ;generate test pattern
+        lda toggle          ;seed or modifier
+        bmi gen_add_seed
+        dec toggle
+        clc
+        lda seed
+        adc #5
+        sta seed
+        jmp gen_add_end
+gen_add_seed
+        inc toggle
+        clc
+        lda modifier
+        adc #3
+        sta modifier
+gen_add_end
+        ldx #2
+        lda seed
+gen_test_pre                 
+        clc
+        adc modifier
+        dex
+        bpl gen_test_pre
+        ldx #127
+gen_test_pat
+        sta pattern,x
+        clc
+        adc modifier
+        dex
+        bpl gen_test_pat
+        rts
+
+
+        stop_debug
+        

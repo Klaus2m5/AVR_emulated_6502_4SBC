@@ -1,0 +1,23 @@
+        code        
+        org $1000
+        
+ACIA    equ $bff0
+flag    equ $bfff
+
+inloop
+        lda ACIA        ;get input
+        beq inloop
+        sta ACIA
+        cmp #13
+        beq sendcr
+wait
+        lda flag
+        and #1
+        beq wait
+        sta flag
+        bne inloop
+sendcr
+        lda #10
+        sta ACIA
+        bne inloop
+        db  $db

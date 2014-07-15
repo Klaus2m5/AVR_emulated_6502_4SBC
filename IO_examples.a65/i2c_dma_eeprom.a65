@@ -1,0 +1,304 @@
+iomap   equ $bf00       ;I/O page (A15:8)
+; diag
+emu_dig equ iomap+$fc   ;diagnostic emulator flags, read/write
+; RS232
+ser_dat equ iomap+$f0   ;RS232 RX/TX data register, read/write
+ser_msk equ iomap+$fe   ;RS232 interrupt enable mask register, read/write
+ser_flg equ iomap+$ff   ;RS232 buffer flag register, read/write
+; timer
+tim_cdn equ iomap+$f1   ;10ms tick timer countdown register, read/write
+t1_adr  equ iomap+$f4   ;timer 1 register address, read/write
+t1_dat  equ iomap+$f5   ;timer 1 register data, read/write
+tim_msk equ iomap+$fe   ;timer interrupt enable mask register, read/write
+tim_flg equ iomap+$ff   ;timer flag register, read/write
+; IRQ vector
+irq_vec equ iomap+$fd   ;irq vector register, read only
+; character LCD
+lcd_cmd equ iomap+$d0   ;lcd command register, read/write
+lcd_dat equ iomap+$d1   ;lcd data register, read/write
+lcd_rcd equ iomap+$d2   ;lcd raw command register (no busy wait), read/write
+lcd_rdt equ iomap+$d3   ;lcd raw data register (no busy wait), read/write
+; I2C
+i2c_cmd equ iomap+$f2   ;i2c command register, write only
+i2c_sta equ iomap+$f2   ;i2c status register, read only
+i2c_dat equ iomap+$f3   ;i2c data register, read/write
+; SPI
+;spi_cmd equ iomap+$f6   ;spi command register, write only
+;spi_lrd equ iomap+$f6   ;spi last read data register, read only
+;spi_dat equ iomap+$90   ;spi data register set, read/write
+; SPI device list
+;spi_sd  equ spi_dat     ;SD card slot
+;spi_165 equ spi_dat+1   ;74HC165 parallel input shift register
+;spi_595 equ spi_dat+2   ;74HC595 parallel output shift register
+;spi_eep equ spi_dat+3   ;25LC512 EEPROM
+; DMA
+dma_cmd equ iomap+$f7   ;dma command register, write only
+dma_sta equ iomap+$f7   ;dma status register, read only
+dma_dat equ iomap+$f8   ;dma data register, read/write
+
+eep_adr equ $a0
+
+        bss
+        org 0
+t_count     ds  4       ;# of 10ms ticks since last (re)start
+dma_cmd_i   ds  2       ;indirect pointer to dma_cmd
+sm_init     ds  2       ;seed & modifier init
+cur_adr     ds  2       ;current address in EEPROM
+seed        ds  1       ;test pattern seed & modifier
+modifier    ds  1
+toggle      ds  1
+dma_trc_x   ds  1       ;pointer to next trace entry
+
+        org $200
+read        ds  128     ;readback pattern
+pattern     ds  128     ;generated pattern
+dma_trace   ds  256     ;dma stat during irq trace
+
+              
+        code
+
+stop_debug   macro
+        db  $db         ;uses 65c02 stop instruction, exception trap on 6502
+        endm
+
+i2c_start   macro       ;\1 = address
+        local start_wack
+start_wack
+        lda #2          ;start 400 kHz
+        sta i2c_cmd
+        lda #\1         ;send address
+        sta i2c_dat
+        lda i2c_sta     ;test ack
+        and #$40
+        beq start_wack ;loop on nak - no timeout
+        endm
+
+i2c_stop    macro
+        lda #0          ;stop
+        sta i2c_cmd
+        endm
+
+        org $1000
+
+start
+        sei
+        lda #0          ;reset 10ms count & trace
+        sta t_count
+        sta t_count+1
+        sta t_count+2
+        sta t_count+3
+        sta dma_trc_x
+        tax
+        tay
+        lda #lo(dma_cmd) ;set indirect pointer to dma_cmd
+        sta dma_cmd_i
+        lda #hi(dma_cmd)
+        sta dma_cmd_i+1
+trc_clr    
+        sta dma_trace,x
+        inx
+        bne trc_clr
+        lda #1          ;allow 10ms tick
+        sta tim_flg
+        sta tim_msk
+        cli
+        jsr reset_seed
+write128
+        jsr gen_pattern
+        ldx #1          ;set dma parameters
+        stx dma_cmd
+wr_dma_parm
+        lda dma_pbuf,x
+        sta dma_dat
+        inx
+        cpx #5
+        bne wr_dma_parm
+        i2c_start eep_adr ;write eep
+        lda cur_adr+1   ;send address high
+        sta i2c_dat
+        lda cur_adr     ;send address low
+        sta i2c_dat
+        ldx #0
+        lda #4          ;write dma
+        sta dma_cmd
+;        sta (dma_cmd_i),y
+        lda i2c_sta     ;should be ack, 400kHz
+        and #%1111111   ;mask bit 7 - Int from I2C device
+        cmp #%1000100
+        sei
+        bne *           ;failed i2c status
+        lda dma_sta     ;should be $14 - write i2c, normal end
+        cmp #$14
+        bne *           ;failed dma status
+        cli
+        lda #4
+        sta dma_cmd
+;        sta (dma_cmd_i,x)
+        lda i2c_sta     ;should be ack, 400kHz
+        and #%1111111   ;mask bit 7 - Int from I2C device
+        cmp #%1000100
+        sei
+        bne *           ;failed i2c status
+        lda dma_sta     ;should be $14 - write i2c, normal end
+        cmp #$14
+        bne *           ;failed dma status
+        cli
+        i2c_stop
+        lda cur_adr     ;address = next 128
+        clc
+        adc #128        
+        sta cur_adr
+        bcc write128
+        inc cur_adr+1
+        bne write128
+
+readall
+        jsr reset_seed
+read128
+        ldx #1          ;set dma parameters
+        stx dma_cmd
+rd_dma_parm
+        lda dma_rbuf,x
+        sta dma_dat
+        inx
+        cpx #5
+        bne rd_dma_parm
+        jsr gen_pattern
+        i2c_start eep_adr ;write eep address
+        lda cur_adr+1   ;write address high
+        sta i2c_dat
+        lda cur_adr     ;write address low
+        sta i2c_dat
+        i2c_start eep_adr+1 ;rep. start read
+        ldx #0
+        lda #5          ;read dma
+        sta dma_cmd
+;        sta (dma_cmd_i),y
+        lda i2c_sta     ;should be ack, read, 400kHz
+        and #%1111111   ;mask bit 7 - Int from I2C device
+        cmp #%1001100
+        sei
+        bne *           ;failed i2c status
+        lda dma_sta     ;should be $15 - read i2c, normal end
+        cmp #$15
+        bne *           ;failed dma status
+        cli
+        lda #5
+        sta dma_cmd
+;        sta (dma_cmd_i,x)
+        lda i2c_sta     ;should be ack, read, 400kHz
+        and #%1111111   ;mask bit 7 - Int from I2C device
+        cmp #%1001100
+        sei
+        bne *           ;failed i2c status
+        lda dma_sta     ;should be $15 - read i2c, normal end
+        cmp #$15
+        bne *           ;failed dma status
+        cli
+        i2c_stop
+        ldx #127
+verify1 
+        lda pattern,x
+        cmp read,x
+        beq verify2
+        sei             ;trap for miscompare
+        stop_debug
+        cli
+verify2
+        dex
+        bpl verify1
+        lda cur_adr     ;address = next 128
+        clc
+        adc #128
+        sta cur_adr
+        bcc verify3
+        inc cur_adr+1
+        bne verify3
+        jmp readall     ;loop indefinitely
+verify3
+        jmp read128
+
+reset_seed
+        lda #0
+rs_seed sta cur_adr     ;reset seed & current address
+        sta cur_adr+1
+        sta toggle
+        lda sm_init
+        sta seed
+        lda sm_init+1
+        sta modifier
+        rts
+
+gen_pattern                 ;generate test pattern
+        lda toggle          ;seed or modifier
+        bmi gen_add_seed
+        dec toggle
+        clc
+        lda seed
+        adc #5
+        sta seed
+        jmp gen_add_end
+gen_add_seed
+        inc toggle
+        clc
+        lda modifier
+        adc #3
+        sta modifier
+gen_add_end
+        ldx #2
+        lda seed
+gen_test_pre                 
+        clc
+        adc modifier
+        dex
+        bpl gen_test_pre
+        ldx #127
+gen_test_pat
+        sta pattern,x
+        clc
+        adc modifier
+        dex
+        bpl gen_test_pat
+        rts
+
+init    inc sm_init     ;initialize seed & modifier
+        bne init
+        inc sm_init+1
+        jmp init        ;AP1000 to start test
+
+irq_t0
+        pha
+        txa
+        pha
+        lda tim_flg     ;clear all timer interrupts
+        sta tim_flg
+        ldx dma_trc_x   ;trace current dma command
+        lda dma_sta
+        sta dma_trace,x
+        inc dma_trc_x
+        inc t_count     ;count events since last (re)start
+        bne irq_rti
+        inc t_count+1
+        bne irq_rti
+        inc t_count+2
+        bne irq_rti
+        inc t_count+3
+irq_rti
+        pla
+        tax
+        pla
+        rti
+
+dma_pbuf    db  3       ;not used for i2c
+            dw  pattern
+            dw  64
+dma_rbuf    db  3       ;not used for i2c
+            dw  read
+            dw  64
+
+        org $fffc
+        dw  init        ;reset vector 
+        dw  irq_t0      ;IRQ vector
+        
+        end init
+        

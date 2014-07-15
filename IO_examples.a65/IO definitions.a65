@@ -1,0 +1,38 @@
+iomap   equ $bf00       ;I/O page (A15:8)
+; diag
+emu_dig equ iomap+$fc   ;diagnostic emulator flags, read/write
+; RS232
+ser_dat equ iomap+$f0   ;RS232 RX/TX data register, read/write
+ser_msk equ iomap+$fe   ;RS232 interrupt enable mask register, read/write
+ser_flg equ iomap+$ff   ;RS232 buffer flag register, read/write
+; timer
+tim_cdn equ iomap+$f1   ;10ms tick timer countdown register, read/write
+t1_adr  equ iomap+$f4   ;timer 1 register address, read/write
+t1_dat  equ iomap+$f5   ;timer 1 register data, read/write
+tim_msk equ iomap+$fe   ;timer interrupt enable mask register, read/write
+tim_flg equ iomap+$ff   ;timer flag register, read/write
+; IRQ vector
+irq_vec equ iomap+$fd   ;irq vector register, read only
+; character LCD
+lcd_cmd equ iomap+$d0   ;lcd command register, read/write
+lcd_dat equ iomap+$d1   ;lcd data register, read/write
+lcd_rcd equ iomap+$d2   ;lcd raw command register (no busy wait), read/write
+lcd_rdt equ iomap+$d3   ;lcd raw data register (no busy wait), read/write
+; I2C
+i2c_cmd equ iomap+$f2   ;i2c command register, write only
+i2c_sta equ iomap+$f2   ;i2c status register, read only
+i2c_dat equ iomap+$f3   ;i2c data register, read/write
+; SPI
+spi_cmd equ iomap+$f6   ;spi command register, write only
+spi_lrd equ iomap+$f6   ;spi last read data register, read only
+spi_dat equ iomap+$90   ;spi data register set, read/write
+; SPI device list
+spi_sd  equ spi_dat     ;SD card slot
+spi_165 equ spi_dat+1   ;74HC165 parallel input shift register
+spi_595 equ spi_dat+2   ;74HC595 parallel output shift register
+spi_eep equ spi_dat+3   ;25LC512 EEPROM
+; DMA
+dma_cmd equ iomap+$f7   ;dma command register, write only
+dma_sta equ iomap+$f7   ;dma status register, read only
+dma_dat equ iomap+$f8   ;dma data register, read/write
+

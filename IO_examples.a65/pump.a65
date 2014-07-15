@@ -1,0 +1,380 @@
+        bss
+        org 0
+ld_count    dw 0            ;pump count lda
+st_count    dw 0            ;pump count sta
+dec_count   dw 0            ;decimal work count
+dec_digit   db 0            ;digit output
+
+IO_reg      equ $200        ;pump target
+IO_flag     equ $bfff       ;interrupt flags, bit 0 10ms tick
+acia        equ $bff0       ;serial IO
+
+over_stat   equ 7           ;static overhead compensation
+over_dyn    equ 30          ;dynamic overhead compensation
+        code
+        org $400
+read_test   macro
+;        ldx IO_reg
+        nop
+;        nop 4               ;calibration 250 kB/s
+            endm
+write_test  macro
+;        stx IO_reg
+        nop 2
+;        nop 8               ;calibration 125 kB/s
+            endm            
+
+start   ;start of program
+        lda #0          ;clear counts
+        sta ld_count
+        sta ld_count+1
+        sta ld_count+2
+        sta ld_count+3
+
+        ldy #100+over_stat ;1 second count
+        lda #1          ;tick
+        sta IO_flag     ;clear
+wait_load
+        bit IO_flag     ;wait next tick
+        beq wait_load                
+        sta IO_flag     ;clear again
+        
+loadloop
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test       ;10
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test       ;20
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test       ;30
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test       ;40
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test       ;50
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test       ;60
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test       ;70
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test       ;80
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test       ;90
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test 
+        read_test       ;100
+        nop over_dyn    ;overhead adjust
+        inc ld_count
+        bne skip
+        inc ld_count+1
+        iny             ;overhead correction
+skip    bit IO_flag     ;wait next tick
+        bne end_load                
+next_load
+        jmp loadloop
+end_load
+        sta IO_flag     ;clear again
+        dey
+        bne next_load
+        
+        ldy #100+over_stat ;1 second
+wait_store
+        bit IO_flag     ;wait next tick
+        beq wait_store                
+        sta IO_flag     ;clear again
+        
+storeloop
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test      ;10
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test      ;20
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test      ;30
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test      ;40
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test      ;50
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test      ;60
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test      ;70
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test      ;80
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test      ;90
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test
+        write_test      ;100
+        nop over_dyn    ;overhead adjust
+        inc st_count
+        bne skip1
+        inc st_count+1
+        iny             ;overhead correction
+skip1   bit IO_flag     ;wait next tick
+        bne end_store                
+next_store
+        jmp storeloop
+end_store
+        sta IO_flag     ;clear again
+        dey
+        bne next_store
+
+        ldx #crlf
+        jsr print_msg
+        
+        lda ld_count    ;print read speed
+        sta dec_count
+        lda ld_count+1
+        sta dec_count+1
+        jsr bin2asc
+        ldx #rdmsg
+        jsr print_msg
+
+        lda st_count    ;print write speed
+        sta dec_count
+        lda st_count+1
+        sta dec_count+1
+        jsr bin2asc
+        ldx #wrtmsg
+        jsr print_msg
+
+        db  2           ;causing a halt
+        
+        jmp *
+
+        
+
+bin2asc                     ;convert 16bit binary to ASCII and send to serial
+        ldx #0
+b2a_lead                    ;leading zero supression
+        lda dec_count+1      
+        cmp dec_conv+1,x
+        bcc b2a_small
+        bne b2a_big
+        lda dec_count
+        cmp dec_conv,x
+        bcs b2a_big
+b2a_small                   ;digit smaller than or equal to zero        
+        lda #' '
+        sta acia
+        inx
+        inx
+        cpx #6              ;suppress 3 zeros max
+        bne b2a_lead
+b2a_big                     ;digit bigger than zero
+        lda #'0'-1
+        sta dec_digit
+b2a_loop                    ;subtract 10^x until done
+        inc dec_digit
+        lda dec_count
+        sec
+        sbc dec_conv,x
+        sta dec_count
+        lda dec_count+1
+        sbc dec_conv+1,x
+        sta dec_count+1
+        bcs b2a_loop
+        
+        lda dec_count       ;reverse excessive count
+        adc dec_conv,x
+        sta dec_count
+        lda dec_count+1
+        adc dec_conv+1,x
+        sta dec_count+1
+        
+        lda dec_digit       ;send digit to serial
+        sta acia
+        inx
+        inx
+        cpx #8              ;until last digit
+        bne b2a_big
+        
+        lda #','
+        sta acia
+        clc                 ;last digit <10
+        lda dec_count
+        adc #'0'
+        sta acia
+        rts
+        
+print_msg
+pr_loop lda msg,x
+        beq pr_exit
+        sta acia
+        inx
+        bne pr_loop
+pr_exit rts
+
+msg
+rdmsg   equ *-msg
+        db  " kB/s read\r\n",0
+wrtmsg  equ *-msg
+        db  " kB/s write"
+crlf    equ *-msg        
+        db  "\r\n",0
+
+dec_conv
+        dw  10000,1000,100,10
+
+tick    ;interrupt vector to catch 10ms timer tick
+
+        org $fffc       ;vectors
+        dw  start
+        dw  tick
+        org        

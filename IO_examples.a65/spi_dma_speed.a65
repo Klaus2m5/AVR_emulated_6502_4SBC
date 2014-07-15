@@ -1,0 +1,172 @@
+iomap   equ $bf00       ;I/O page (A15:8)
+; diag
+emu_dig equ iomap+$fc   ;diagnostic emulator flags, read/write
+; RS232
+ser_dat equ iomap+$f0   ;RS232 RX/TX data register, read/write
+ser_msk equ iomap+$fe   ;RS232 interrupt enable mask register, read/write
+ser_flg equ iomap+$ff   ;RS232 buffer flag register, read/write
+; timer
+tim_cdn equ iomap+$f1   ;10ms tick timer countdown register, read/write
+t1_adr  equ iomap+$f4   ;timer 1 register address, read/write
+t1_dat  equ iomap+$f5   ;timer 1 register data, read/write
+tim_msk equ iomap+$fe   ;timer interrupt enable mask register, read/write
+tim_flg equ iomap+$ff   ;timer flag register, read/write
+; IRQ vector
+irq_vec equ iomap+$fd   ;irq vector register, read only
+; character LCD
+lcd_cmd equ iomap+$d0   ;lcd command register, read/write
+lcd_dat equ iomap+$d1   ;lcd data register, read/write
+lcd_rcd equ iomap+$d2   ;lcd raw command register (no busy wait), read/write
+lcd_rdt equ iomap+$d3   ;lcd raw data register (no busy wait), read/write
+; I2C
+i2c_cmd equ iomap+$fd   ;i2c command register, write only
+i2c_sta equ iomap+$fd   ;i2c status register, read only
+i2c_dat equ iomap+$fc   ;i2c data register, read/write
+; SPI
+spi_cmd equ iomap+$f6   ;spi command register, write only
+spi_lrd equ iomap+$f6   ;spi last read data register, read only
+spi_dat equ iomap+$90   ;spi data register set, read/write
+; SPI device list
+spi_sd  equ spi_dat     ;SD card slot
+spi_165 equ spi_dat+1   ;74HC165 parallel input shift register
+spi_595 equ spi_dat+2   ;74HC595 parallel output shift register
+spi_eep equ spi_dat+3   ;25LC512 EEPROM
+; DMA
+dma_cmd equ iomap+$f7   ;dma command register, write only
+dma_sta equ iomap+$f7   ;dma status register, read only
+dma_dat equ iomap+$f8   ;dma data register, read/write
+
+ss_beg equ $50          ;hold slave select
+ss_end equ $10          ;end slave select
+
+        bss
+        org 0
+read_pio    ds  2       ;read 4k block, programmed IO
+read_dma    ds  2       ;read 4k block, DMA
+write_pio   ds  2       ;write 4k block, programmed IO
+write_dma   ds  2       ;write 4k block, DMA
+        org $2000
+buf1        ds  4096    ;4k block 1
+              
+        code
+
+stop_debug   macro
+        db  $db         ;uses 65c02 stop instruction, exception trap on 6502
+        endm
+
+start_t1    macro
+        lda #7          ;clear counter
+        sta t1_adr
+        lda #0
+        sta t1_dat
+        sta t1_dat
+        lda #8          ;set tccr to start timer
+        sta t1_adr
+        lda #%1011       ;4µs
+        sta t1_dat
+        endm
+
+stop_t1     macro       ;\1 = location to save count value
+        lda #0          ;stop counter
+        sta t1_dat
+        lda #6          ;read counter
+        sta t1_adr
+        lda t1_dat
+        sta \1
+        lda t1_dat
+        sta \1+1
+        endm
+
+set_dma     macro       ;\1 = parameter set
+        lda #0          ;set dma parameters
+        sta dma_cmd
+        ldx #0
+set_dma\?
+        lda \1,x
+        sta dma_dat
+        inx
+        cpx #5
+        bne set_dma\?
+        endm
+
+        org $1000
+
+start
+
+;read with programmed IO
+        ldy #hi(buf1)   ;reset self modified address
+        sty rd_pio1_hi
+        lda #ss_beg     ;hold slave select
+        sta spi_cmd
+        start_t1
+rd_pio1
+        lda spi_165
+rd_pio1_hi = *+2
+        sta buf1,x
+        inx
+        bne rd_pio1
+        iny
+        sty rd_pio1_hi
+        cpy #(buf1>>8)+$10
+        bne rd_pio1
+        stop_t1 read_pio
+        lda #ss_end     ;end slave select
+        sta spi_cmd
+
+;read with dma
+        set_dma dma_rbuf
+        lda #ss_beg     ;hold slave select
+        sta spi_cmd
+        start_t1
+        lda #3          ;read spi dma
+        sta dma_cmd
+        stop_t1 read_dma
+        lda #ss_end     ;end slave select
+        sta spi_cmd
+
+;write with programmed IO
+        ldy #hi(buf1)   ;reset self modified address
+        sty wt_pio1_hi
+        lda #ss_beg     ;hold slave select
+        sta spi_cmd
+        start_t1
+wt_pio1
+wt_pio1_hi = *+2
+        lda buf1,x
+        sta spi_595
+        inx
+        bne wt_pio1
+        iny
+        sty wt_pio1_hi
+        cpy #(buf1>>8)+$10
+        bne wt_pio1
+        stop_t1 write_pio
+        lda #ss_end     ;end slave select
+        sta spi_cmd
+
+;read with dma
+        set_dma dma_wbuf
+        lda #ss_beg     ;hold slave select
+        sta spi_cmd
+        start_t1
+        lda #2          ;write spi dma
+        sta dma_cmd
+        stop_t1 write_dma
+        lda #ss_end     ;end slave select
+        sta spi_cmd
+
+        stop_debug
+        jmp start
+
+dma_rbuf    db  1       ;serial in
+            dw  buf1
+            dw  4096
+dma_wbuf    db  2       ;serial out
+            dw  buf1
+            dw  4096
+
+        org $fffc       ;reset
+        dw  start
+        
+        end start
+        
