@@ -21,7 +21,7 @@
 ;
 ; contact info at http://2m5.de or email K@2m5.de
 ;
-#define   version "0.83 "   ;makes a printable version number
+#define   version "0.83a"   ;makes a printable version number
 ;
 ; version history:
 ;  0.8   24-jan-13   1st version distributed for testing
@@ -35,6 +35,9 @@
 ;  0.82  20-jul-13   added CMOS core (65C02 instructions and disassembly)
 ;  0.83  17-may-14   added breakpoint support to debugger
 ;                    added SPI support to IO module, DMA for SPI & I2C
+;  0.83a 17-aug-14   changed interrupt disabled in real mode to honor NMI & single step
+;                    fixed diag stop continuing until 10ms interrupt, now immediate
+;                    fixed invalid opcode message broken by check for breakpoint
 ;                    
 ;
 ; ATMEGA16 fuse settings:
@@ -43,7 +46,7 @@
 ;   BOD enabled - 4,0V
 ;   Preserve EEPROM - protect non volatile program memory, else clears all saved programs
 ;
-; related docs:
+; related docs: http://2m5.de/6502_Emu/index.htm
 ;
 ; description of hardware:
 ;   porta0:7  -> address bus high : IO chip select latches
@@ -247,6 +250,7 @@ irq_mask:   .byte 1           ;interrupt mask, bit set if enabled, default 0b000
 irq_flag:   .byte 1           ;interrupt flags, bit set if pending
                               ;bit 7=tx empty, 6=rx full, 0=10ms tick
 ;timer 1
+timer_ena:  .byte 1           ;t0 & t1 interrupt enable bits
 t1_adr:     .byte 1           ;index to t1 register
 t1_ctrl:    .byte 1           ;readback value of TCCR1
 ;tick (10ms) countdown timer
@@ -280,6 +284,7 @@ dma_tab_index:
 dma_tab:    .byte 7
 
 ;RS232 Buffers
+usart_ena:  .byte 1           ;usart interrupt enable bits
 tx_inx:     .byte 1           ;input index to tx fifo
 tx_fill:    .byte 1           ;fill level in tx fifo (0 = empty)
 rx_inx:     .byte 1           ;input index to rx fifo
@@ -319,7 +324,9 @@ rx_buf:     .byte 256         ;receive fifo
    .EQU  IRQ_dis     = 0b00000000   ;disable IRQ
 .endif
 .EQU  NMI_dis     = 0   ;disable both during monitor
- 
+; USART
+.EQU  usart_txi_dis  = 0b10011000   ;RXCIE, RXEN, TXEN
+.EQU  usart_txi_ena  = 0b10111000   ;RXCIE, UDRIE, RXEN, TXEN
 
 .macro      addi
             subi  @0,-@1            ;subtract the negative of an immediate value
@@ -470,7 +477,11 @@ rx_int:
          ifne  rx_send_xoff
             ldi   i,0x13         ;post xoff pending
             sts   flow_cmd,i
-            sbi   ucsrb,udrie    ;notify transmitter
+             ldi   i,usart_txi_ena  ;notify transmitter
+            out   ucsrb,i
+            .ifdef irq_dis_real
+               sts   usart_ena,i
+            .endif
          end   rx_send_xoff
       end   rx_flow
    .endif
@@ -525,7 +536,11 @@ tx_udre:
       dec   k                 ;update pointer
    .endif
    ifeq  tx_fifo_empty
-      cbi   ucsrb,udrie       ;buffer empty - stop rupt
+      ldi   i,usart_txi_dis   ;tx buffer empty - stop rupt
+      out   ucsrb,i
+      .ifdef irq_dis_real
+         sts   usart_ena,i
+      .endif
    end   tx_fifo_empty
    sts   tx_fill,k
    .ifdef iomap                  ;acia emulation
@@ -699,6 +714,12 @@ deb_stop:
    end  inv_op_irq_clear
    ldi   a,NMI_dis         ;no emulator interrupts during monitor
    out   ibus,a
+   .ifdef irq_dis_real
+      ldi   a,0b11            ;enable t0 interrupts (tick, single step)
+      out   timsk,a
+      lds   a,usart_ena       ;enable usart interrupts
+      out   ucsrb,a
+   .endif
    sbiw  pch:pcl,2         ;position to current instruction
    out   tifr,one          ;cancel single step interrupt (tov0)
    sei
@@ -723,6 +744,12 @@ deb_inv_op:
    end  inv_op_irq_clear
    ldi   a,NMI_dis      ;no emulator interrupts during monitor
    out   ibus,a
+   .ifdef irq_dis_real
+      ldi   a,0b11            ;enable t0 interrupts (tick, single step)
+      out   timsk,a
+      lds   a,usart_ena       ;enable usart interrupts
+      out   ucsrb,a
+   .endif
    sbiw  pch:pcl,2         ;position to current instruction
    out   tifr,one          ;cancel single step interrupt (tov0)
    sei
@@ -730,10 +757,10 @@ deb_inv_op:
    ifne_or  deb_stop_unexp
    rcall brkpt_chk_pc
    iftc     deb_stop_unexp ;skip if breakpoint
-      mov   c,opcode
+      mov   d,opcode          ;temporary save opcode
       rcall show_regs
       PrintStr inv_instr      ;"Illegal Opcode "
-      mov   a,c
+      mov   a,d
       rcall PrintHex
       adiw  pch:pcl,1         ;position to next instruction
    end      deb_stop_unexp
@@ -855,8 +882,11 @@ reset:
    out   ubrrl,a
    ldi   a,high(UBRR_value)
    out   ubrrh,a
-   ldi   a,0b10011000      ;rx,tx, rxcie enable
+   ldi   a,usart_txi_dis   ;rx,tx, rxcie enable
    out   ucsrb,a
+   .ifdef irq_dis_real
+      sts   usart_ena,a
+   .endif
    out   tcnt0,zero        ;timer 0 init
    ldi   a,ten_ms
    out   ocr0,a
@@ -1072,8 +1102,12 @@ debugger:      ;entry from t0 cmp match
                   ifne  deb_send_xon
                      ldi   i,0x11         ;post xon pending
                      sts   flow_cmd,i
-                     sbi   ucsrb,udrie    ;notify transmitter
-                  end  deb_send_xon
+                     ldi   i,usart_txi_ena ;notify transmitter
+                     out   ucsrb,i
+                     .ifdef irq_dis_real
+                        sts   usart_ena,i
+                     .endif
+                 end  deb_send_xon
                end   deb_flow
             .endif
             out   sreg,d
@@ -2018,7 +2052,11 @@ prtc:                   ;bypass of rvs video mode check
       loopeq prt_fifo_full
       cli
       lds   c,tx_fill
-      sbi   ucsrb,udrie    ;enable udre interrupt
+      ldi   i,usart_txi_ena   ;notify transmitter
+      out   ucsrb,i
+      .ifdef irq_dis_real
+         sts   usart_ena,i
+      .endif
       st    y+,a           ;store in fifo
       inc   c              ;update pointers
       sts   tx_inx,yl
@@ -2041,7 +2079,11 @@ prtc:                   ;bypass of rvs video mode check
          dec   k                 ;update pointer
       loop     prt_fifo_disabled
       sts   tx_fill,k         ;buffer now empty
-      cbi   ucsrb,udrie       ;stop rupt
+      ldi   i,usart_txi_dis   ;stop rupt
+      out   ucsrb,i
+      .ifdef irq_dis_real
+         sts   usart_ena,i
+      .endif
       do    prt_wait_udre     ;direct output
          sbis  ucsra,udre
       loop  prt_wait_udre
@@ -2710,7 +2752,11 @@ read_serial_esc:
                ifne  esc_send_xon
                   ldi   i,0x11         ;post xon pending
                   sts   flow_cmd,i
-                  sbi   ucsrb,udrie    ;notify transmitter
+                  ldi   i,usart_txi_ena ;notify transmitter
+                  out   ucsrb,i
+                  .ifdef irq_dis_real
+                     sts   usart_ena,i
+                  .endif
                end  esc_send_xon
             end   esc_flow
          .endif
@@ -2799,7 +2845,11 @@ discard_serial_stream:
                ifne  disc_send_xon
                   ldi   i,0x11         ;post xon pending
                   sts   flow_cmd,i
-                  sbi   ucsrb,udrie    ;notify transmitter
+                  ldi   i,usart_txi_ena ;notify transmitter
+                  out   ucsrb,i
+                  .ifdef irq_dis_real
+                     sts   usart_ena,i
+                  .endif
                end  disc_send_xon
             end   disc_flow
          .endif
@@ -3019,15 +3069,15 @@ back_line:     .db   13,27,91,"K",27,91,"1A",0,0                        ; 5
 
 ;verify minimum versions of includes
 ;required versions
-.if   io_version < 830
+.if   io_version < 831
    .error "6502_Emu_IO.inc is below the required minimum version!"
 .endif
 .ifdef   cmos_core
-   .if   core_version < 830
+   .if   core_version < 831
       .error "6502_Emu_CMOS.inc is below the required minimum version!"
    .endif
 .else
-   .if   core_version < 830
+   .if   core_version < 831
       .error "6502_Emu_NMOS.inc is below the required minimum version!"
    .endif
 .endif
@@ -3037,16 +3087,35 @@ back_line:     .db   13,27,91,"K",27,91,"1A",0,0                        ; 5
 .if   sam_version < 810
    .error "sam.inc is below the required minimum version!"
 .endif
+;above base versions
+.if   io_version > 831
+   .error "6502_Emu_IO.inc is above the base version!"
+.endif
+.ifdef   cmos_core
+   .if   core_version > 831
+      .error "6502_Emu_CMOS.inc is above the base version!"
+   .endif
+.else
+   .if   core_version > 831
+      .error "6502_Emu_NMOS.inc is above the base version!"
+   .endif
+.endif
+.if   config_version > 831
+   .error "6502_Emu_config.inc is above the base version!"
+.endif
+.if   sam_version > 831
+   .error "sam.inc is above the base version!"
+.endif
 ;recommended versions
-.if   io_version < 830
+.if   io_version < 831
    .warning "6502_Emu_IO.inc is below the recommended minimum version!"
 .endif
 .ifdef   cmos_core
-   .if   core_version < 830
+   .if   core_version < 831
       .warning "6502_Emu_CMOS.inc is below the recommended minimum version!"
    .endif
 .else
-   .if   core_version < 830
+   .if   core_version < 831
       .warning "6502_Emu_NMOS.inc is below the recommended minimum version!"
    .endif
 .endif

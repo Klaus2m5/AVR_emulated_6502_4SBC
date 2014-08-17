@@ -17,7 +17,7 @@
 ; You should have received a copy of the GNU General Public License
 ; along with this program.  If not, see <http://www.gnu.org/licenses/>.
 ;
-.set  io_version = 830
+.set  io_version = 831
 ;*****************************************************************
 ;
 ; IO macros
@@ -399,9 +399,10 @@ iowrite:
 ;**************************************************************
 io_reset:   
    cli
-   in    a,timsk        ;no timer interrupts for reset delays
-   cbr   a,0b11
-   out   timsk,a
+;   in    a,timsk        ;no timer interrupts for reset delays
+;   cbr   a,0b11
+;   out   timsk,a
+   out   timsk,zero     ;no timer interrupts for reset delays
    ldi   a,0b00000101   ;timer 0 ctc off, clock / 1024
    out   tccr0,a
 
@@ -441,11 +442,12 @@ io_reset:
    .endif   
 
    out   tcnt0,zero        ;restart t0
-   ldi   a,0b11            ;t0 compare match interrupt enable
-   out   tifr,a
-   in    a,timsk
-   sbr   a,0b11
+   out   tifr,allon        ;clear all timer flags
+   ldi   a,0b11            ;t0 compare match & overflow interrupt enable
+;   in    a,timsk
+;   sbr   a,0b11
    out   timsk,a
+   sts   timer_ena,a
    out   cbus,readmem      ;OE / read mode back on
    sei
    ret
@@ -656,7 +658,9 @@ acia_rx:
                out   udr,b
                dec   d              ;update pointer
                ifeq  acia_rx_tx_empty
-                  cbi   ucsrb,udrie    ;stop rupt
+                  ldi   b,usart_txi_dis ;tx buffer now empty
+                  out   ucsrb,b
+                  sts   usart_ena,b
                end   acia_rx_tx_empty
                sts   tx_fill,d
             end      acia_rx_tx
@@ -700,7 +704,11 @@ acia_rx:
                ifne  acia_send_xon
                   ldi   i,0x11         ;post xon pending
                   sts   flow_cmd,i
-                  sbi   ucsrb,udrie    ;notify transmitter
+                  ldi   i,usart_txi_ena ;notify transmitter
+                  out   ucsrb,i
+                  .ifdef irq_dis_real
+                     sts   usart_ena,i
+                  .endif
                end  acia_send_xon
             end   acia_flow
          .endif
@@ -749,7 +757,11 @@ iw_retry_ext:
       cbi   cbusddr,3      ;clear IRQ
    end   tx_irq_clear
 
-   sbi   ucsrb,udrie    ;enable udre interrupt
+   ldi   i,usart_txi_ena ;notify transmitter
+   out   ucsrb,i
+   .ifdef irq_dis_real
+      sts   usart_ena,i
+   .endif
    lds   xl,tx_inx      ;load pointer
    ldi   xh,high(tx_buf)
    st    x+,operand     ;send data to fifo
@@ -913,9 +925,11 @@ ir_mask:
 iw_mask:
    mov   a,operand            ;set t1 mask
    andi  a,0x3c
-   in    b,timsk
-   andi  b,0xc3
-   or    a,b
+   ori   a,0b11               ;precharge timsk with t0 ie
+   sts   timer_ena,a
+   .ifdef irq_dis_real
+      sbrs  stat2,2              ;immediate only if not disabled
+   .endif
    out   timsk,a
    mov   a,operand            ;save mask
    sts   irq_mask,a
@@ -1044,8 +1058,8 @@ ir_diag:
 iw_diag:
    sbrs  operand,7         ;test enter diag
    ifs   iw_diag_enter
-      sbr   flags,(1<<deb_on) ;turn debugging on
-      cbr   flags,(1<<emu_run) ;stop emulation
+      andi  flags,(1<<string) ;stop emulation, keep string
+      sbr   flags,0b101       ;debugging on & active
       lds   a,irq_flag        ;clear ACIA TDRE & RDRF
       cbr   a,0b11000000
       sts   irq_flag,a
@@ -1062,6 +1076,19 @@ iw_diag:
       st    y+,a              ;store data
       sts   rx_inx,yl         ;store pointers
       sts   rx_fill,yl
+      ;*** test diag stop immediate
+;      sbr   flags,(1<<deb_act)  ;prevent double_activation
+      ldi   a,NMI_dis      ;no emulator interrupts during monitor
+      out   ibus,a
+      .ifdef irq_dis_real
+         ldi   a,0b11            ;enable t0 interrupts (tick, single step)
+         out   timsk,a
+         lds   a,usart_ena       ;enable usart interrupts
+         out   ucsrb,a
+      .endif
+      sei
+      rjmp  debugger
+      ;*** test diag stop immediate
    end   iw_diag_enter
 .ifdef ena_diag
    sbrc  operand,2         ;test force reset
@@ -1086,11 +1113,11 @@ diag_reset:
 
 ;reset of interrupt masks and flags
 irq_rs:
-   in    a,timsk           ;clear t1 mask
-   cbr   a,0x3c
-   out   timsk,a
-   ldi   a,0x3c            ;clear t1 flags
-   out   tifr,a
+;   in    a,timsk           ;clear t1 mask
+;   cbr   a,0x3c
+;   out   timsk,a
+;   ldi   a,0x3c            ;clear t1 flags
+;   out   tifr,a
    cbi   cbusddr,3         ;clear IRQ
    cbi   cbusddr,2         ;clear NMI
    sts   selftest,zero     ;clear saved flags
@@ -1331,9 +1358,9 @@ dma_spi_rb1:
    out   timsk,a
    sbr   flags,(1<<dma_rpt) ;set dma interrupt modifier
    do       spi_drb_loop
-      .ifdef irq_dis_real
-         sbrs  stat2,2           ;all interrupts disable
-      .endif
+;      .ifdef irq_dis_real
+;         sbrs  stat2,2           ;all interrupts disable
+;      .endif
       sei
       ;read SPI
       out   spi_out,c         ;slave select
@@ -1415,9 +1442,9 @@ dma_spi_wb1:
       ;read memory
       out   abuslo,zl
       out   abushi,zh
-      .ifdef irq_dis_real
-         sbrs  stat2,2           ;all interrupts disable
-      .endif
+;      .ifdef irq_dis_real
+;         sbrs  stat2,2           ;all interrupts disable
+;      .endif
             sei
             nop
             cli
@@ -1850,9 +1877,9 @@ dma_i2c_rb1:
    exiteq   i2c_drb_loop
       ;read i2c
       out   dbusout,allon     ;float all outputs high
-      .ifdef irq_dis_real
-         sbrs  stat2,2           ;all interrupts disable
-      .endif
+;      .ifdef irq_dis_real
+;         sbrs  stat2,2           ;all interrupts disable
+;      .endif
       sei
       out   dbusddr,zero
       cli
@@ -1917,9 +1944,9 @@ dma_i2c_wb1:
       ;read memory
       out   abuslo,zl
       out   abushi,zh
-      .ifdef irq_dis_real
-         sbrs  stat2,2           ;all interrupts disable
-      .endif
+;      .ifdef irq_dis_real
+;         sbrs  stat2,2           ;all interrupts disable
+;      .endif
             sei
             nop
             cli

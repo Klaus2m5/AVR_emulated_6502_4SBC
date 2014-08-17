@@ -8,7 +8,7 @@
 ; the source code.
 ;
 ;*********************************************************************
-.set  config_version = 830
+.set  config_version = 831
 
 ;ATMega platform - ATMega16 or ATMega32
 ;  ATMega32 may be required due to flash size for configured features 
@@ -47,9 +47,9 @@
 ;.equ irq_dis_real = 1
 ;  virtual = background interrupts always allowed = always full control,
 ;            no atomic timing for disabled instruction sequence.
-;  real    = absolutely no interrupts allowed when disabled, program must not have extended
-;            disable periods, atomic timing is enforced, NMI will be disabled when the I-bit
-;            is set, reset button mandatory, adds 1 cycle (62.5ns) to every instruction.
+;  real    = absolutely no interrupts allowed when disabled except single step and NMI,
+;            program must not have extended disable periods, atomic timing is enforced,
+;            reset button mandatory to recover the monitor/debugger when I bit remains set.
 
 ;ROM load & write protect page boundary - RAM at this page and above is write protected
 ;adds 2 cycles (125ns) to instructions writing to memory (stores & modifying memory)
@@ -168,12 +168,12 @@
 ;64kB serial EEPROM reserved for non volatile program storage
 ;eep_adr >= 8 = I2C slave adr.; eep_adr < 8 = SPI device adr.
 ;none if undefined
-.equ  eep_adr = 0xa0       ;I2C EEPROM
-;.equ  eep_adr = 3          ;SPI EEPROM
+;.equ  eep_adr = 0xa0       ;I2C EEPROM
+.equ  eep_adr = 3          ;SPI EEPROM
 
 ; self diag register enable, allow force IRQ, NMI, RESET
 ; should stay undefined to prevent you from shooting yourself in the foot
-;.equ ena_diag  = 1
+.equ ena_diag  = 1
 
 .endif
 .if config_part == 2 ;invoked from 6502_Emu_IO.inc
@@ -201,7 +201,7 @@ ior_tab:
    rjmp  ir_exit     ;6x
    rjmp  ir_exit     ;7x
    rjmp  ir_exit     ;8x
-   rjmp  spr_data    ;9x   SPI data register, A0:2=SS, A3=1=cont/0=last
+   rjmp  spr_data    ;9x   SPI data register
    rjmp  io65xx_rd   ;Ax   65xx IO chip RAM
    rjmp  io65xx_rd   ;Bx   65xx IO chip
    rjmp  ltch_rd     ;Cx   74HC573 latch(es)
@@ -220,7 +220,7 @@ iow_tab:
    rjmp  iw_exit     ;6x
    rjmp  iw_exit     ;7x
    rjmp  iw_exit     ;8x
-   rjmp  spw_data    ;9x   SPI data register, A0:2=SS, A3=1=cont/0=last
+   rjmp  spw_data    ;9x   SPI data register
    rjmp  io65xx_wrt  ;Ax   65xx IO chip (RAM)
    rjmp  io65xx_wrt  ;Bx   65xx IO chip
    rjmp  ltch_wrt    ;Cx   74HC573 latch(es)
@@ -317,7 +317,7 @@ iow_int_tab:
    .error "Address decode tables are misaligned!"
 .endif
 
-;SPI adress to slave select translation
+;SPI address to slave select translation
 .ifdef spi_vat
 spi_vss:
    spi_virt_ss

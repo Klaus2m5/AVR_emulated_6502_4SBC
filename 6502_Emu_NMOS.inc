@@ -19,7 +19,7 @@
 ; along with this program.  If not, see <http://www.gnu.org/licenses/>.
 ;
 ;
-.set  core_version = 830
+.set  core_version = 831
 #define core_string "N6502" ;identify NMOS core in version message
 
 ;*****************************************************************
@@ -343,37 +343,26 @@ dis_opcode: .db   "BRK",op_s
 .macro      op_decode
             out   abuslo,pcl        ;opcode fetch
             out   abushi,pch
-         .ifdef irq_dis_real
-                  sbrs  stat2,2           ;all interrupts disable
-                  sei                     ;allow emulation INT, NMI
-                  adiw  pch:pcl,1         ;pc -> op low
-                  cli
+            sei                     ;allow emulation INT, NMI
+            adiw  pch:pcl,1         ;pc -> op low
+            cli
             wait_data_valid 4       ;240 minimum @ 16MHz
-         .else
-                  sei                     ;allow emulation INT, NMI
-                  adiw  pch:pcl,1         ;pc -> op low
-                  cli
-            wait_data_valid 3       ;180 minimum @ 16MHz
-         .endif
             in    opcode,dbusin
 
             out   abuslo,pcl        ;operand address low prefetch
             out   abushi,pch
-            wait_data_valid 5       ;300ns minimum @ 16MHz 
+            wait_data_valid 6       ;360ns minimum @ 16MHz 
                   adiw  pch:pcl,1         ;pc -> op high
                   ijmp                    ;execute opcode
 .endmacro
 
 ;op decode after single, opcode already fetched
 .macro      op_decode_single
-         .ifdef irq_dis_real
-            sbrs  stat2,2           ;all interrupts disable
-         .endif
             sei                     ;allow emulation INT, NMI
             out   abuslo,pcl        ;operand address low prefetch
             cli
             out   abushi,pch
-            wait_data_valid 5       ;300ns minimum @ 16MHz 
+            wait_data_valid 6       ;360ns minimum @ 16MHz 
                   adiw  pch:pcl,1         ;pc -> op high
                   ijmp                    ;execute opcode
 .endmacro
@@ -397,7 +386,7 @@ no_branch:  op_decode
             out   abushi,pch
                   adiw  pch:pcl,1         ;pc -> next instruction
                   cbr   flags,(1<<op_ind) ;operand address is direct
-            wait_data_valid 2       ;120ns minimum @ 16MHz
+            wait_data_valid 3       ;180ns minimum @ 16MHz
             in    ophigh,dbusin
 .endmacro
 
@@ -410,7 +399,7 @@ no_branch:  op_decode
                   adiw  pch:pcl,1         ;pc -> next instruction
                   cbr   flags,(1<<op_ind) ;operand address is direct
                   add   oplow,regx
-            wait_data_valid 3       ;180ns minimum @ 16MHz
+            wait_data_valid 4       ;240ns minimum @ 16MHz
             in    ophigh,dbusin
             adc   ophigh,zero
             rjmp  @0o               ;fetch operand
@@ -425,7 +414,7 @@ no_branch:  op_decode
                   adiw  pch:pcl,1         ;pc -> next instruction
                   cbr   flags,(1<<op_ind) ;operand address is direct
                   add   oplow,regy
-            wait_data_valid 3       ;180ns minimum @ 16MHz
+            wait_data_valid 4       ;240ns minimum @ 16MHz
             in    ophigh,dbusin
             adc   ophigh,zero
             rjmp  @0o               ;fetch operand
@@ -565,10 +554,28 @@ skip_IO:
 
 ;IRQ enable/disable
 .macro      IRQ_restore             ;sets IRQ according to I-flag
-            ldi   a,IRQ_ena
-            sbrc  stat2,2           ;disable if I-flag set
-            ldi   a,IRQ_dis
-            out   ibus,a
+            .ifdef irq_dis_real     ;+7 if enabled, +5 if disabled
+               sbrs  stat2,2        ;IRQ disabled?
+               rjmp  IRQ_rest_ena 
+                  ldi   a,IRQ_dis
+                  out   ibus,a
+                  out   timsk,one         ;only TOV0 (single step) stays enabled
+                  ldi   a,0b11000         ;no USART interrupts, only RX & TX enable
+               rjmp  IRQ_rest_exit
+IRQ_rest_ena: 
+                  ldi   a,IRQ_ena         ;enable IRQ
+                  out   ibus,a
+                  lds   a,timer_ena       ;enable timers interrupts
+                  out   timsk,a
+                  lds   a,usart_ena       ;enable usart interrupts
+IRQ_rest_exit:
+               out   ucsrb,a
+            .else
+               ldi   a,IRQ_ena
+               sbrc  stat2,2           ;disable if I-flag set
+               ldi   a,IRQ_dis
+               out   ibus,a
+            .endif
 .endmacro
 
 ; store modified operand to memory
@@ -683,7 +690,12 @@ IRQ:
                   ldi   zl,0xfe     ;preload vector low  
                   ldi   a,IRQ_dis
                   out   ibus,a
-                  ;status merge while we are waiting for data
+                   .ifdef irq_dis_real     ;+3
+                     out   timsk,one         ;only TOV0 (single step) stays enabled
+                     ldi   a,0b11000         ;no USART interrupts, only RX & TX enable
+                     out   ucsrb,a
+                  .endif
+                 ;status merge while we are waiting for data
                   mov   a,stat            ;merge status in 6502 format
                   andi  a,0b11            ;------ZC
             wait_data_valid 5       ;300ns minimum @ 16MHz
@@ -753,7 +765,12 @@ NMI:
                   ldi   zl,0xfa     ;preload vector low  
                   ldi   a,IRQ_dis
                   out   ibus,a
-                  ;status merge while we are waiting for data
+                   .ifdef irq_dis_real     ;+3
+                     out   timsk,one         ;only TOV0 (single step) stays enabled
+                     ldi   a,0b11000         ;no USART interrupts, only RX & TX enable
+                     out   ucsrb,a
+                  .endif
+                 ;status merge while we are waiting for data
                   mov   a,stat            ;merge status in 6502 format
                   andi  a,0b11            ;------ZC
             wait_data_valid 5       ;300ns minimum @ 16MHz
@@ -851,6 +868,12 @@ CLI_s:      in    opcode,dbusin     ;next opcode
             cbr   stat2,0b100
             ldi   a,IRQ_ena
             out   ibus,a
+            .ifdef irq_dis_real     ;+6
+               lds   a,timer_ena       ;enable timers interrupts
+               out   timsk,a
+               lds   a,usart_ena       ;enable usart interrupts
+               out   ucsrb,a
+            .endif
 
             op_decode_single        ;next instruction
 
@@ -908,7 +931,7 @@ LSR_s:      in    opcode,dbusin     ;next opcode
 ; opcode:         NOP
 NOP_s:      in    opcode,dbusin     ;next opcode
 
-            wait_ns  1000,10        ;2 6502 cycles
+            wait_ns  1000,11        ;2 6502 cycles
 
             op_decode_single        ;next instruction
 
@@ -1018,8 +1041,13 @@ SED_s:      in    opcode,dbusin     ;next opcode
 SEI_s:      in    opcode,dbusin     ;next opcode
 
             sbr   stat2,0b100       ;AVR emulated OP
-            ldi   a,IRQ_dis
+            ldi   a,IRQ_dis         ;only NMI stays enabled
             out   ibus,a
+            .ifdef irq_dis_real     ;+3
+               out   timsk,one         ;only TOV0 (single step) stays enabled
+               ldi   a,0b11000         ;no USART interrupts, only RX & TX enable
+               out   ucsrb,a
+            .endif
 
             op_decode_single        ;next instruction
 
@@ -1121,7 +1149,7 @@ JMP_i:      in    oplow,dbusin      ;save low pointer to pc
             out   abuslo,pcl        ;fetch pc low  
             out   abushi,pch
                   adiw  pch:pcl,1
-            wait_data_valid 1       ;60ns minimum @ 16MHz
+            wait_data_valid 2       ;120ns minimum @ 16MHz
 
 JMP_a:      in    oplow,dbusin      ;save pc low   
             out   abuslo,pcl        ;fetch pc high
@@ -1207,6 +1235,11 @@ BRK_s:           ;save new PC as operand address
                   ldi   zl,0xfe     ;preload vector low   
                   ldi   a,IRQ_dis
                   out   ibus,a
+                  .ifdef irq_dis_real     ;+3
+                     out   timsk,one         ;only TOV0 (single step) stays enabled
+                     ldi   a,0b11000         ;no USART interrupts, only RX & TX enable
+                     out   ucsrb,a
+                  .endif
                   ;status merge while we are waiting for data
                   mov   a,stat            ;merge status in 6502 format
                   andi  a,0b11            ;------ZC
