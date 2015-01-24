@@ -4,7 +4,7 @@
 ;
 ; An AVR emulates a 6502 with >2MHz speed
 ;
-; Copyright (C) 2013-2014  Klaus Dormann
+; Copyright (C) 2013-2015  Klaus Dormann
 ;
 ; This program is free software: you can redistribute it and/or modify
 ; it under the terms of the GNU General Public License as published by
@@ -21,7 +21,7 @@
 ;
 ; contact info at http://2m5.de or email K@2m5.de
 ;
-#define   version "0.83a"   ;makes a printable version number
+#define   version "0.83b"   ;makes a printable version number
 ;
 ; version history:
 ;  0.8   24-jan-13   1st version distributed for testing
@@ -38,9 +38,11 @@
 ;  0.83a 17-aug-14   changed interrupt disabled in real mode to honor NMI & single step
 ;                    fixed diag stop continuing until 10ms interrupt, now immediate
 ;                    fixed invalid opcode message broken by check for breakpoint
+;  0.83b 24-jan-15   fixed ATMega32 interrupt table, fixed break hanging on some terminals
+;                    reduced interrupt latency caused by the monitor waiting for tx buffer
 ;                    
 ;
-; ATMEGA16 fuse settings:
+; ATMEGA16 & ATMEGA32 fuse settings:
 ;   16 MHz crystal
 ;   JTAGEN unprogrammed
 ;   BOD enabled - 4,0V
@@ -333,7 +335,7 @@ rx_buf:     .byte 256         ;receive fifo
 .endmacro
 .macro      addiw ;(RdL:RdH, k)
             subi  @0l,low(-@1)      ;word subtract the negative of an immediate value  
-            sbci  @0l,high(-@1)
+            sbci  @0h,high(-@1)
 .endmacro 
 
 ;
@@ -386,42 +388,81 @@ rx_buf:     .byte 256         ;receive fifo
 
 ;*****************************************************************
 ;
-; reset and interrupt vectors
+; reset and interrupt vectors according to µc type
 ;
 ;*****************************************************************
 
-            jmp   reset       ; Reset handler
-            rjmp  NMI         ; INT0 handler
-            nop
-            rjmp  IRQ         ; INT1 handler
-            nop
-            jmp   illegalint  ; Timer2 compare match
-            jmp   illegalint  ; Timer2 overflow
-         .ifdef iomap
-            jmp   t1_icr      ; Timer1 capture event
-            jmp   t1_ocra     ; Timer1 compare match A 
-            jmp   t1_ocrb     ; Timer1 compare match B
-            jmp   t1_ovi      ; Timer1 overflow handler
-         .else
-            jmp   illegalint  ; Timer1 capture event
-            jmp   illegalint  ; Timer1 compare match A 
-            jmp   illegalint  ; Timer1 compare match B
-            jmp   illegalint  ; Timer1 overflow handler
-         .endif
-            jmp   t0_ovi      ; Timer0 overflow handler - debugger single step
-            jmp   illegalint  ; SPI - Serial transfer complete
-            rjmp  rx_int      ; USART - RX complete
-            nop
-            rjmp  tx_udre     ; USART - data register empty
-            nop
-            jmp   illegalint  ; USART - TX complete
-            jmp   illegalint  ; ADC conversion complete
-            jmp   illegalint  ; EEPROM ready
-            jmp   illegalint  ; Analog comparator
-            jmp   illegalint  ; TWI serial interface
-            jmp   illegalint  ; INT2 handler
-            jmp   t0_cmi      ; Timer0 compare match - debugger 10ms timer
-            jmp   illegalint  ; SPM ready
+#ifdef _M16DEF_INC_
+   jmp   reset       ; Reset handler
+   rjmp  NMI         ; INT0 handler
+   nop
+   rjmp  IRQ         ; INT1 handler
+   nop
+   jmp   illegalint  ; Timer2 compare match
+   jmp   illegalint  ; Timer2 overflow
+   .ifdef iomap
+      jmp   t1_icr      ; Timer1 capture event
+      jmp   t1_ocra     ; Timer1 compare match A 
+      jmp   t1_ocrb     ; Timer1 compare match B
+      jmp   t1_ovi      ; Timer1 overflow handler
+   .else
+      jmp   illegalint  ; Timer1 capture event
+      jmp   illegalint  ; Timer1 compare match A 
+      jmp   illegalint  ; Timer1 compare match B
+      jmp   illegalint  ; Timer1 overflow handler
+   .endif
+   jmp   t0_ovi      ; Timer0 overflow handler - debugger single step
+   jmp   illegalint  ; SPI - Serial transfer complete
+   rjmp  rx_int      ; USART - RX complete
+   nop
+   rjmp  tx_udre     ; USART - data register empty
+   nop
+   jmp   illegalint  ; USART - TX complete
+   jmp   illegalint  ; ADC conversion complete
+   jmp   illegalint  ; EEPROM ready
+   jmp   illegalint  ; Analog comparator
+   jmp   illegalint  ; TWI serial interface
+   jmp   illegalint  ; INT2 handler
+   jmp   t0_cmi      ; Timer0 compare match - debugger 10ms timer
+   jmp   illegalint  ; SPM ready
+#endif
+#ifdef _M32DEF_INC_
+   jmp   reset       ; Reset handler
+   rjmp  NMI         ; INT0 handler
+   nop
+   rjmp  IRQ         ; INT1 handler
+   nop
+   jmp   illegalint  ; INT2 handler
+   jmp   illegalint  ; Timer2 compare match
+   jmp   illegalint  ; Timer2 overflow
+   .ifdef iomap
+      jmp   t1_icr      ; Timer1 capture event
+      jmp   t1_ocra     ; Timer1 compare match A 
+      jmp   t1_ocrb     ; Timer1 compare match B
+      jmp   t1_ovi      ; Timer1 overflow handler
+   .else
+      jmp   illegalint  ; Timer1 capture event
+      jmp   illegalint  ; Timer1 compare match A 
+      jmp   illegalint  ; Timer1 compare match B
+      jmp   illegalint  ; Timer1 overflow handler
+   .endif
+   jmp   t0_cmi      ; Timer0 compare match - debugger 10ms timer
+   jmp   t0_ovi      ; Timer0 overflow handler - debugger single step
+   jmp   illegalint  ; SPI - Serial transfer complete
+   rjmp  rx_int      ; USART - RX complete
+   nop
+   rjmp  tx_udre     ; USART - data register empty
+   nop
+   jmp   illegalint  ; USART - TX complete
+   jmp   illegalint  ; ADC conversion complete
+   jmp   illegalint  ; EEPROM ready
+   jmp   illegalint  ; Analog comparator
+   jmp   illegalint  ; TWI serial interface
+   jmp   illegalint  ; SPM ready
+#endif
+.if pc < 0x2a
+   .error "unknown device - interrupt vectors could not be built!"
+.endif
 
 ;*****************************************************************
 ;
@@ -451,12 +492,14 @@ rx_int:
       ifeq  rx_break_irq
          cbi   cbusddr,3         ;clear any pending acia interrupts
       end   rx_break_irq
-      sts   rx_fill,one       ;clear fifo
-      ldi   i,10              ;start with a linefeed 
-      ldi   xh,high(rx_buf)   ;load buffer index
-      lds   xl,rx_inx
-      st    x+,i              ;store data
-      sts   rx_inx,xl         ;store pointers
+      sts   rx_fill,zero      ;clear buffer
+      sts   tx_fill,zero
+      do    rx_brk_wait
+         sbis  pind,0            ;exit after RX pin returns to idle
+      loop  rx_brk_wait
+      push  a
+      call crlf
+      pop   a
       ldi   i,27              ;force escape
    end      rx_break
    lds   k,rx_fill         ;check buffer full
@@ -562,7 +605,7 @@ tx_udre:
    reti
 
 ; Messages part 1 (optimizing empty space before opcode table for CMOS)
-; 76 words available if rx/tx maximum size and DMA (16 more for NMOS)
+; some words available if rx/tx maximum size and DMA (16 more for NMOS)
 ;                              word count, X = don't use in part 1 ---> ;##
 ;.ifdef cmos_core
 ;stp_instr:     .db   "STP - Emulator halted",0                          ; X
@@ -574,11 +617,11 @@ tx_udre:
 load_wait:     .db   13,10,"Loading, <ESC> to abort",13,10,0            ;14
 load_abort:    .db   " Load aborted",0                                  ; 7
 ;err_chksum:    .db   " Checksum failed",0,0                             ; 9
-;rs_vect_empty: .db   13,10,"Check reset vector",0,0                     ;11
+rs_vect_empty: .db   13,10,"Check reset vector",0,0                     ;11
 reset_msg:     .db   "  Reset",0                                        ; 4
 bpt_clrd_msg:  .db   10,13,"All breakpoints cleared",0                  ;13
 bpt_info:      .db   10,13,"Breakpoints  (slot#:address)",13,10,0,0     ;17
-bpt_info_none: .db   10,13,"No breakpoints active",0                    ;12
+;bpt_info_none: .db   10,13,"No breakpoints active",0                    ;12
 bpt_slot_full: .db   10,13,"No more breakpoint slots available",0,0     ;19
 .ifndef irq_dis_real       ;+53 words available (6 less for NMOS)
 load_ok:       .db   13,"Load OK",0,0                                   ; 5
@@ -1428,6 +1471,8 @@ br_inv_cmd:    rjmp  invalid_command
                   movw  y,z
                end   dis_next
                ldi   a,10              ;count
+               sbrc  flags,emu_run
+                  ldi   a,6               ;reduce count if running
                do     dis_loop
                   push  a
                   rcall crlf
@@ -1646,10 +1691,10 @@ eep_auto_invalid:    rjmp  invalid_command
 ; M = show memory   Syntax: M(aaaa|+|-|)<CR>
 ;     aaaa = address, leading zeros can be omitted
 ;     + = next block, - = previous block, <CR> = same block 
-;     displays 0x100 Bytes at full line address
+;     displays 0x100 (0x40) Bytes at full line address
 ;
             cpi   a,'M'   
-            ifeq  show_mem
+            ifeq_far show_mem
                out   cbus,readmem      ;prepare to read
                lds   zl,lmem_display   ;load previous address
                lds   zh,lmem_display+1
@@ -1658,7 +1703,12 @@ eep_auto_invalid:    rjmp  invalid_command
                breq  skip_get_adr
                cpi   a,'+'
                ifeq  show_next
-                  inc   zh
+                  sbrc  flags,emu_run
+                  ifs   show_nxt_100
+                     inc   zh
+                  else  show_nxt_100
+                     addiw  z,0x40        ;reduce bytes if running
+                  end   show_nxt_100
                   ld    a,y+           ;no parameter after +
                   tst   a
                   breq  skip_get_adr
@@ -1666,7 +1716,14 @@ eep_auto_invalid:    rjmp  invalid_command
                end   show_next
                cpi   a,'-'
                ifeq  show_previous
-                  dec   zh
+                  sbrc  flags,emu_run
+                  ifs   show_prev_100
+                     dec   zh
+                  else  show_prev_100
+                     subi  zl,0x40        ;reduce bytes if running
+                     sbc   zh,zero
+                  end   show_prev_100
+                  mov   d,a
                   ld    a,y+           ;no parameter after -
                   tst   a
                   breq  skip_get_adr
@@ -1676,7 +1733,10 @@ eep_auto_invalid:    rjmp  invalid_command
                rcall get_adr        ;get Address
 skip_get_adr:
                andi  zl,0xe0        ;mask full lines only
-               mov   d,zl
+               mov   a,zl
+               sbrc  flags,emu_run
+                  addi  a,0x40         ;reduce bytes if running
+               mov   d,a
                sts   lmem_display,zl
                sts   lmem_display+1,zh
                do    show_mem_line
@@ -3052,11 +3112,11 @@ built_msg:     .db   " built ",__DATE__," ",__TIME__,0                  ;14
 ;load_wait:     .db   13,10,"Loading, <ESC> to abort",13,10,0            ;14
 ;load_abort:    .db   " Load aborted",0                                  ; 7
 err_chksum:    .db   " Checksum failed",0,0                             ; 9
-rs_vect_empty: .db   13,10,"Check reset vector",0,0                     ;11
+;rs_vect_empty: .db   13,10,"Check reset vector",0,0                     ;11
 ;reset_msg:     .db   "  Reset",0                                        ; 4
 ;bpt_clrd_msg:  .db   10,13,"All breakpoints cleared",0                  ;13
 ;bpt_info:      .db   10,13,"Breakpoints  (slot#:address)",13,10,0,0     ;17
-;bpt_info_none: .db   10,13,"No breakpoints active",0                    ;12
+bpt_info_none: .db   10,13,"No breakpoints active",0                    ;12
 ;bpt_slot_full: .db   10,13,"No more breakpoint slots available",0,0     ;19
 .ifdef irq_dis_real    ;more messages not in part 1
 load_ok:       .db   13,"Load OK",0,0                                   ; 5
@@ -3088,26 +3148,26 @@ back_line:     .db   13,27,91,"K",27,91,"1A",0,0                        ; 5
    .error "sam.inc is below the required minimum version!"
 .endif
 ;above base versions
-.if   io_version > 831
+.if   io_version > 832
    .error "6502_Emu_IO.inc is above the base version!"
 .endif
 .ifdef   cmos_core
-   .if   core_version > 831
+   .if   core_version > 832
       .error "6502_Emu_CMOS.inc is above the base version!"
    .endif
 .else
-   .if   core_version > 831
+   .if   core_version > 832
       .error "6502_Emu_NMOS.inc is above the base version!"
    .endif
 .endif
-.if   config_version > 831
-   .error "6502_Emu_config.inc is above the base version!"
+.if   config_version > 832
+;   .error "6502_Emu_config.inc is above the base version!"
 .endif
-.if   sam_version > 831
+.if   sam_version > 832
    .error "sam.inc is above the base version!"
 .endif
 ;recommended versions
-.if   io_version < 831
+.if   io_version < 832
    .warning "6502_Emu_IO.inc is below the recommended minimum version!"
 .endif
 .ifdef   cmos_core

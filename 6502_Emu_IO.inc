@@ -2,7 +2,7 @@
 ; 6502 EMULATOR include
 ;     I/O page (iomap) address decode & emulated I/O
 ;
-; Copyright (C) 2013-2014  Klaus Dormann
+; Copyright (C) 2013-2015  Klaus Dormann
 ;
 ; This program is free software: you can redistribute it and/or modify
 ; it under the terms of the GNU General Public License as published by
@@ -17,7 +17,7 @@
 ; You should have received a copy of the GNU General Public License
 ; along with this program.  If not, see <http://www.gnu.org/licenses/>.
 ;
-.set  io_version = 831
+.set  io_version = 832
 ;*****************************************************************
 ;
 ; IO macros
@@ -470,7 +470,7 @@ lcd_rd:                 ;referenced from ior_tab = address
    ifs      lcd_rd_scan ;scan busy flag
       cbi   abuslo,0       ;status register
 ;      do    lcd_rd_busy
-      par_pre_rd 230
+      par_pre_rd 450
       sbrc  a,7            ;test status busy
       rjmp  ir_retry       ;on busy
 ;      loop  lcd_rd_busy
@@ -480,7 +480,7 @@ lcd_rd:                 ;referenced from ior_tab = address
          dec   a           ;extra time after busy
       loopne lcd_rd_adr    ;to increment RAM address
    end      lcd_rd_scan
-   par_rd 230           ;230ns enable strobe
+   par_rd 450           ;450ns enable strobe
 
 lcd_wrt:                ;referenced from iow_tab = address
    set_io_select lcd_sel
@@ -491,7 +491,7 @@ lcd_wrt:                ;referenced from iow_tab = address
    ifs      lcd_wrt_scan   ;scan busy flag
       cbi   abuslo,0       ;status register
 ;      do    lcd_wrt_busy
-         par_pre_rd 230
+         par_pre_rd 450
          sbrc  a,7            ;test status busy
          rjmp  iw_retry       ;on busy
 ;      loop  lcd_wrt_busy
@@ -502,7 +502,7 @@ lcd_wrt:                ;referenced from iow_tab = address
       loopne lcd_wrt_adr ; to increment RAM address
    end      lcd_wrt_scan
 
-   par_wrt 230          ;230ns enable strobe
+   par_wrt 450          ;450ns enable strobe
    rjmp  iw_exit        ;next instruction
 
 lcd_rs:
@@ -584,7 +584,7 @@ lcd_rs_wrt:          ;write to lcd with timeout on busy
          sts   lcd_flags,zero
          ret
       end   lcd_rs_timeout
-      par_pre_rd 230
+      par_pre_rd 450
       sbrc  a,7            ;test status busy
    loop  lcd_rs_busy
    ldi   a,32           ;delay 96 cycles = 6µs
@@ -593,7 +593,7 @@ lcd_rs_wrt:          ;write to lcd with timeout on busy
    loopne lcd_rs_adr    ; to increment RAM address
 lcd_rs_fwrt:
    out   abuslo,oplow   ;set register
-   par_wrt 230          ;write with 230ns strobe
+   par_wrt 450          ;write with 450ns strobe
    ret
 
 lcd_rs_rd:           ;read from lcd with timeout on busy
@@ -606,7 +606,7 @@ lcd_rs_rd:           ;read from lcd with timeout on busy
          sts   lcd_flags,zero
          ret
       end   lcd_rs_rd_timeout
-      par_pre_rd 230
+      par_pre_rd 450
       sbrc  a,7            ;test status busy
    loop  lcd_rs_rd_busy
    ldi   a,32           ;delay 96 cycles = 6µs
@@ -614,7 +614,7 @@ lcd_rs_rd:           ;read from lcd with timeout on busy
       dec   a           ; extra time after busy
    loopne lcd_rs_rd_adr ; to increment RAM address
    out   abuslo,oplow   ;set register
-   par_pre_rd  230      ;read with 230ns strobe
+   par_pre_rd  450      ;read with 450ns strobe
    mov   operand,a
    ret
 .endif
