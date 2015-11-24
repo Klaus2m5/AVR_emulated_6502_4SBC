@@ -21,7 +21,7 @@
 ;
 ; contact info at http://2m5.de or email K@2m5.de
 ;
-#define   version "0.83b"   ;makes a printable version number
+#define   version "0.83c"   ;makes a printable version number
 ;
 ; version history:
 ;  0.8   24-jan-13   1st version distributed for testing
@@ -40,7 +40,9 @@
 ;                    fixed invalid opcode message broken by check for breakpoint
 ;  0.83b 24-jan-15   fixed ATMega32 interrupt table, fixed break hanging on some terminals
 ;                    reduced interrupt latency caused by the monitor waiting for tx buffer
-;                    
+;  0.83c 24-nov-15   fixed dma load program corrupted message due to false count in
+;                      dma save program
+;
 ;
 ; ATMEGA16 & ATMEGA32 fuse settings:
 ;   16 MHz crystal
@@ -3129,7 +3131,7 @@ back_line:     .db   13,27,91,"K",27,91,"1A",0,0                        ; 5
 
 ;verify minimum versions of includes
 ;required versions
-.if   io_version < 831
+.if   io_version < 833
    .error "6502_Emu_IO.inc is below the required minimum version!"
 .endif
 .ifdef   cmos_core
@@ -3148,26 +3150,26 @@ back_line:     .db   13,27,91,"K",27,91,"1A",0,0                        ; 5
    .error "sam.inc is below the required minimum version!"
 .endif
 ;above base versions
-.if   io_version > 832
+.if   io_version > 833
    .error "6502_Emu_IO.inc is above the base version!"
 .endif
 .ifdef   cmos_core
-   .if   core_version > 832
+   .if   core_version > 833
       .error "6502_Emu_CMOS.inc is above the base version!"
    .endif
 .else
-   .if   core_version > 832
+   .if   core_version > 833
       .error "6502_Emu_NMOS.inc is above the base version!"
    .endif
 .endif
-.if   config_version > 832
+.if   config_version > 833
 ;   .error "6502_Emu_config.inc is above the base version!"
 .endif
-.if   sam_version > 832
+.if   sam_version > 833
    .error "sam.inc is above the base version!"
 .endif
 ;recommended versions
-.if   io_version < 832
+.if   io_version < 833
    .warning "6502_Emu_IO.inc is below the recommended minimum version!"
 .endif
 .ifdef   cmos_core

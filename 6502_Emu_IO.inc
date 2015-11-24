@@ -17,7 +17,7 @@
 ; You should have received a copy of the GNU General Public License
 ; along with this program.  If not, see <http://www.gnu.org/licenses/>.
 ;
-.set  io_version = 832
+.set  io_version = 833
 ;*****************************************************************
 ;
 ; IO macros
@@ -2612,9 +2612,11 @@ dma_eep_save:
    rcall eep_write
    mov   a,xl              ;calculate count from end address
    sub   a,zl
+   mov   b,xh
+   sbc   b,zh
+   push  b
    rcall eep_write
-   mov   a,xh
-   sbc   a,zh
+   pop   a
    rcall eep_write
    do       eep_app_save_data
       cp    xl,zl
