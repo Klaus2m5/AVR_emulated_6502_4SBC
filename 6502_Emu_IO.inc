@@ -2,7 +2,7 @@
 ; 6502 EMULATOR include
 ;     I/O page (iomap) address decode & emulated I/O
 ;
-; Copyright (C) 2013-2015  Klaus Dormann
+; Copyright (C) 2013-2018  Klaus Dormann
 ;
 ; This program is free software: you can redistribute it and/or modify
 ; it under the terms of the GNU General Public License as published by
@@ -17,7 +17,7 @@
 ; You should have received a copy of the GNU General Public License
 ; along with this program.  If not, see <http://www.gnu.org/licenses/>.
 ;
-.set  io_version = 833
+.set  io_version = 840
 ;*****************************************************************
 ;
 ; IO macros
@@ -239,6 +239,8 @@ wait_spdr:
    in    operand,dbusin       ;data latched during previous cycle
    out   cbus,readmem         ;IO-select off & read mode back on
    ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
+   sbrc  stat2,3           ;test decimal flag
+      ldi   oc_tabh,high(oc_tabd) 
    ret
 .endmacro
 
@@ -328,12 +330,12 @@ phi2_synctable:            ;delay -1 cycle for each count in tcnt
    nop2                    ;7/0
    nop2                    ;1/1
    nop2                    ;3/1
-   nop2                    ;5/1
-   nop                     ;7/1
+   ldi   oc_tabh,high(oc_tab) ;5/1 restore zh as opcode table
+   sbrc  stat2,3           ;6/1 test decimal flag
+      ldi   oc_tabh,high(oc_tabd) ;7/1
    in    operand,dbusin    ;0/0 input latched at 7/1 +30ns
    dis_io_select           ;1/0 end strobe 125ns after phi2 te
    out   cbus,readmem      ;IO-select off & read mode back on
-   ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
    ret
 .endmacro
 
@@ -359,11 +361,169 @@ phi2_synctable:            ;delay -1 cycle for each count in tcnt
    out   dbusout,operand   ;0/1 precharge data to be written
    out   dbusddr,allon     ;1/1 write data valid 125 ns after phi2 le
    nop2                    ;2/1
-   nop2                    ;4/1
-   nop2                    ;6/1
+   nop                     ;4/1
+   ldi   oc_tabh,high(oc_tab) ;5/1 restore zh as opcode table
+   sbrc  stat2,3           ;6/1 test decimal flag
+      ldi   oc_tabh,high(oc_tabd) ;7/1
    dis_io_select           ;0/0 end strobe 60ns after phi2 te
    out   dbusddr,zero      ;data hold ends
-   rjmp  iw_exit           ;next instruction
+   rjmp  iw_exit2          ;next instruction
+.endmacro
+
+;*** IO subrocessor ***
+;
+;macro nibble read from IO subprocessor
+.macro   nib_rd
+   ena_io_select           ;begin CS strobe
+   sbi   abuslo,3          ;generate R/-W
+nib_rd_nak:
+                           ;xx.x  clocks after ACK raised
+                           ;      delayed to xx.x + 3 max 
+   sbis  dbusin,7          ; 2.5  wait for ACK
+      rjmp  nib_rd_nak        ; ---  loop on -ACK
+   out   aloddr,zero       ; 3.5! set input (3.5 - 6.5 after ACK)
+   dis_io_select           ; 4.5  end CS strobe
+   ldi   oc_tabh,high(oc_tab) ; 5.5  restore zh as opcode table
+   sbrc  stat2,3           ; 7.5  test decimal flag
+      ldi   oc_tabh,high(oc_tabd) ; 7.5
+   nop                     ; 8.5
+   nop                     ; 9.5
+   in    a,aloin           ;10.5! read high nibble (9 - 12 after  ACK)
+   swap  a                 ;11.5
+   andi  a,0xf0            ;12.5
+   mov   operand,a         ;13.5
+   nop                     ;14.5
+   in    a,aloin           ;15.5! read low nibble (14 - 17 after ACK)
+   andi  a,0xf             ;16.5
+   or    operand,a         ;17.5
+   out   aloddr,allon      ;18.5! set output (18.5 - 21.5 after ACK)
+   out   cbus,readmem      ;set read mode back on
+   ret
+.endmacro
+
+;macro nibble write to IO subprocessor
+.macro   nib_wrt
+   ena_io_select           ;begin CS strobe
+   cbi   abuslo,3          ;generate R/-W
+   swap  operand
+   ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
+nib_wrt_nak:
+                           ;xx.x  clocks after ACK raised
+                           ;      delayed to xx.x + 3 max 
+   sbis  dbusin,7          ; 2.5  wait for ACK
+      rjmp  nib_wrt_nak       ; ---  loop on -ACK
+   out   abuslo,operand    ; 3.5! output operand high (3.5 - 6.5 after ACK)
+   dis_io_select           ; 4.5  end CS strobe
+   swap  operand           ; 5.5
+   sbrc  stat2,3           ; 7.5  test decimal flag
+      ldi   oc_tabh,high(oc_tabd) ;7.5
+   out   abuslo,operand    ; 8.5! output operand low (8.5 - 11.5 after ACK)
+   rjmp  iw_exit2
+.endmacro
+
+;macro subprocessor reset
+.macro nib_rs
+iosub_det_retry:
+   PrintStr_far iosub_msg
+   ldi   a,iomap           ;identify io subprocessor
+   call  PrintHex
+   ldi   a,low(iosub_adr)
+   call  PrintHex
+   call  space
+;   sbic  dbusin,7          ;test ACK low
+;   rjmp  iosub_det_fail
+   ldi   a,3               ;write io register address (r/-w = 0, address = 3)
+   out   abuslo,a
+   clr   c                 ;timeout counter
+   ena_io_select           ;begin CS strobe
+iosub_det_waitack:
+   dec   c
+   breq  iosub_det_fail
+   sbis  dbusin,7          ;wait for ACK
+   rjmp  iosub_det_waitack
+iosub_det_waitackend:
+   dec   c
+   brne  iosub_det_wait
+iosub_det_fail:
+   dis_io_select
+   out   cbus,clear        ;end exp. reg. select
+   PrintStr_far iosub_fail
+iosub_det_halt:
+   sbis  ucsra,rxc         ;retry on escape
+      rjmp  iosub_det_halt
+   in    a,udr
+   cpi   a,27
+   brne  iosub_det_halt
+   rjmp  iosub_det_retry
+iosub_det_wait:
+   sbic  dbusin,7          ;wait for -ACK
+   rjmp  iosub_det_waitackend
+   ;actual reset starts here
+   ldi   a,5               ;write ios_aad with wdtcr address
+   out   abuslo,a
+   ldi   a,wdtcr           
+iosub_rs_wdt:
+   ena_io_select           ;begin CS strobe
+   nop
+   swap  a
+nib_wrt_nak:
+   sbis  dbusin,7          ; 2.5  wait for ACK
+      rjmp  nib_wrt_nak       ; ---  loop on -ACK
+   out   abuslo,a          ; 3.5! output operand high (3.5 - 6.5 after ACK)
+   dis_io_select           ; 4.5  end CS strobe
+   swap  a                 ; 5.5
+   nop                     ; 6.5
+   nop                     ; 7.5
+   out   abuslo,a          ; 8.5! output operand low (8.5 - 11.5 after ACK)
+   cpi   a,wdtcr
+   ldi   a,7               ;write ios_xr with reset command (63)
+   nop
+   nop
+   out   abuslo,a
+   ldi   a,63
+   breq  iosub_rs_wdt
+   ldi   a,'V'             ;get version from subprocessor
+   call  PrintChr
+nib_rd_ver:
+   ena_io_select           ;begin CS strobe
+nib_rd_ack:
+   ldi   a,8+6             ;read data register
+   out   abuslo,a
+nib_rd_nak:
+                           ;xx.x  clocks after ACK raised
+                           ;      delayed to xx.x + 3 max 
+   sbis  dbusin,7          ; 2.5  wait for ACK
+      rjmp  nib_rd_nak        ; ---  loop on -ACK
+   out   aloddr,zero       ; 3.5! set input (3.5 - 6.5 after ACK)
+   dis_io_select           ; 4.5  end CS strobe
+   ldi   oc_tabh,high(oc_tab) ; 5.5  restore zh as opcode table
+   sbrc  stat2,3           ; 7.5  test decimal flag
+      ldi   oc_tabh,high(oc_tabd) ; 7.5
+   nop                     ; 8.5
+   nop                     ; 9.5
+   in    a,aloin           ;10.5! read high nibble (9 - 12 after  ACK)
+   swap  a                 ;11.5
+   andi  a,0xf0            ;12.5
+   mov   d,a               ;13.5
+   nop                     ;14.5
+   in    a,aloin           ;15.5! read low nibble (14 - 17 after ACK)
+   andi  a,0xf             ;16.5
+   or    a,d               ;17.5
+   out   aloddr,allon      ;18.5! set output (18.5 - 21.5 after ACK)
+   tst   a                 ;end of string?
+   breq  nib_rs_exit
+   call  PrintChr
+   rjmp  nib_rd_ver
+nib_rs_exit:
+   out   cbus,clear        ;end exp. reg. select
+   ret
+
+   .ifndef  iosub_msg
+      .equ  iosub_msg = pc
+      .db   13,10,"IO subprocessor @ ",0,0
+      .equ  iosub_fail = pc
+      .db   "failed, cannot continue!",0,0
+   .endif
 .endmacro
 
 ;****************************************************************
@@ -399,9 +559,6 @@ iowrite:
 ;**************************************************************
 io_reset:   
    cli
-;   in    a,timsk        ;no timer interrupts for reset delays
-;   cbr   a,0b11
-;   out   timsk,a
    out   timsk,zero     ;no timer interrupts for reset delays
    ldi   a,0b00000101   ;timer 0 ctc off, clock / 1024
    out   tccr0,a
@@ -411,9 +568,10 @@ io_reset:
 ;*** custom IO resets go here ***
    rcall t1_rs          ;reset timer 1
    rcall irq_rs         ;reset interrupts & flags
+   rcall mmu_rs         ;reset MMU
    rcall lcd_rs         ;reset character LCD
-   rcall spi_rs         ;reset SPI bus if present
-   rcall i2c_rs         ;reset I2C bus if present
+   rcall spi_rs         ;reset SPI bus
+   rcall i2c_rs         ;reset I2C bus
    ; spi reset with IO expansion select reset (as early as possible)
    io_modules_reset     ;defined by a macro in 6502_Emu_config.inc
 
@@ -444,13 +602,78 @@ io_reset:
    out   tcnt0,zero        ;restart t0
    out   tifr,allon        ;clear all timer flags
    ldi   a,0b11            ;t0 compare match & overflow interrupt enable
-;   in    a,timsk
-;   sbr   a,0b11
    out   timsk,a
    sts   timer_ena,a
    out   cbus,readmem      ;OE / read mode back on
    sei
    ret
+
+.ifdef mmu_sel
+;*****************************************************************
+;
+;Memory Managment Unit
+;
+;  the MMU maps 4 16k address segments to 16 32k RAM elements
+;  RAM elements are divided into 2 halves to match the segment size
+;  segment |    0    |    1    |    2    |    3    |
+;  address |0000-3FFF|4000-7FFF|8000-BFFF|C000-FFFF|
+;  element |  lower  |  upper  |  lower  |  upper  |
+;  default |    0    |    0    |    1    |    1    |
+
+mmu_rd:
+   andi  oplow,0b11     ;mask lower address bits
+   addi  oplow,low(mmu_emu)
+   ldi   ophigh,high(mmu_emu)
+   ld    operand,opointer  ;read saved MMU RAM element
+   ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
+   sbrc  stat2,3           ;test decimal flag
+      ldi   oc_tabh,high(oc_tabd) 
+   ret
+
+mmu_wrt:
+   andi  oplow,0b11     ;mask lower address bits
+   addi  oplow,low(mmu_emu) ;set RAM shadow
+   ldi   ophigh,high(mmu_emu)
+   st    opointer,operand  ;save MMU RAM element
+   set_io_select mmu_sel
+   par_wrt 60
+   rjmp  iw_exit        ;next instruction
+/*
+mmu_rs:           ;reset to default banks = 0 0 1 1
+   clr   operand     ;1st RAM element 0
+   clr   a           ;1st address segment
+   ldi   zl,low(mmu_emu) ;1st RAM shadow
+   ldi   zh,high(mmu_emu)
+   sts   mmu_sync,allon ;monitor MMU = emulator MMU
+   set_io_reset mmu_sel
+   rcall mmu_rs_seg  ;segment 0 - RAM element 0 low
+   rcall mmu_rs_seg  ;segment 1 - RAM element 0 high
+   inc   operand     ;RAM element 1
+   rcall mmu_rs_seg  ;segment 2 - RAM element 1 low
+                     ;segment 3 - RAM element 1 high
+mmu_rs_seg:          ;reset one segment
+   st    z+,operand  ;write RAM shadow
+   out   abuslo,a    ;write bank switch register
+   par_wrt 60
+   inc   a           ;next address segment
+   ret
+*/
+mmu_rs:                    ;soft reset to current emulator banks
+   clr   a                 ;1st address segment
+   ldi   zl,low(mmu_emu)   ;1st RAM shadow
+   ldi   zh,high(mmu_emu)
+   sts   mmu_sync,allon    ;monitor MMU = emulator MMU
+   set_io_reset mmu_sel
+   do       mmu_rs_el
+      ld    operand,z+     ;read RAM shadow
+      out   abuslo,a       ;write bank switch register
+      par_wrt 60
+      inc   a              ;next address segment
+      cpi   a,4
+   loopne   mmu_rs_el
+   ret
+
+.endif
 
 .ifdef lcd_sel
 ;*****************************************************************
@@ -469,11 +692,9 @@ lcd_rd:                 ;referenced from ior_tab = address
    sbrc  oplow,1        ;address 0 or 1 / not 2 or 3?
    ifs      lcd_rd_scan ;scan busy flag
       cbi   abuslo,0       ;status register
-;      do    lcd_rd_busy
       par_pre_rd 450
       sbrc  a,7            ;test status busy
       rjmp  ir_retry       ;on busy
-;      loop  lcd_rd_busy
       out   abuslo,oplow   ;back to original address
       ldi   a,32           ;delay 96 cycles = 6µs
       do     lcd_rd_adr    ;for older hd44780 requiring 
@@ -490,11 +711,9 @@ lcd_wrt:                ;referenced from iow_tab = address
    sbrc  oplow,1        ;address 0 or 1 / not 2 or 3?
    ifs      lcd_wrt_scan   ;scan busy flag
       cbi   abuslo,0       ;status register
-;      do    lcd_wrt_busy
          par_pre_rd 450
          sbrc  a,7            ;test status busy
          rjmp  iw_retry       ;on busy
-;      loop  lcd_wrt_busy
       out   abuslo,oplow   ;back to original address
       ldi   a,32           ;delay 96 cycles = 6µs
       do     lcd_wrt_adr   ; for older hd44780 requiring 
@@ -716,6 +935,8 @@ acia_rx:
       sts   irq_flag,a
    end   acia_rx_ena
    ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
+   sbrc  stat2,3           ;test decimal flag
+      ldi   oc_tabh,high(oc_tabd) 
    ret
 
 acia_tx:
@@ -801,6 +1022,8 @@ iw_retry_ext:
 t1r_adr:
    lds   operand,t1_adr       ;respond with current address
    ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
+   sbrc  stat2,3           ;test decimal flag
+      ldi   oc_tabh,high(oc_tabd) 
    ret
 
 t1w_adr:
@@ -825,6 +1048,8 @@ t1r_data:
       end   t1r_data_ctl
    end   t1r_data_word
    ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
+   sbrc  stat2,3           ;test decimal flag
+      ldi   oc_tabh,high(oc_tabd) 
    ret
 
 t1w_data:
@@ -901,6 +1126,8 @@ t1_icr:
 tcdn_r:
    lds   operand,tcdn_count   ;respond with remaining ticks
    ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
+   sbrc  stat2,3           ;test decimal flag
+      ldi   oc_tabh,high(oc_tabd) 
    ret
 
 tcdn_w:
@@ -920,6 +1147,8 @@ tcdn_w:
 ir_mask:
    lds   operand,irq_mask     ;respond with current mask
    ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
+   sbrc  stat2,3           ;test decimal flag
+      ldi   oc_tabh,high(oc_tabd) 
    ret
 
 iw_mask:
@@ -933,10 +1162,7 @@ iw_mask:
    out   timsk,a
    mov   a,operand            ;save mask
    sts   irq_mask,a
-;   in    b,tifr               ;check pending flags enabled
-;   andi  b,0x3c
    lds   d,irq_flag
-;   or    d,b                  ;merge t1 & saved           
    and   d,a
    tst   d
    ifeq  mask_irq_clear       ;all masked flags serviced?
@@ -962,6 +1188,8 @@ ir_flag:
    andi  a,0x3c
    or    operand,a            ;merge to saved flags
    ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
+   sbrc  stat2,3           ;test decimal flag
+      ldi   oc_tabh,high(oc_tabd) 
    ret
 
 iw_flag:
@@ -1036,6 +1264,8 @@ ir_vector:
       end   ir_vect_clr_int
    end   ir_vect_internal
    ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
+   sbrc  stat2,3           ;test decimal flag
+      ldi   oc_tabh,high(oc_tabd) 
    ret
 
 ;diag selftest register
@@ -1053,6 +1283,8 @@ ir_diag:
       sbr   a,0b10000000
    or    operand,a
    ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
+   sbrc  stat2,3           ;test decimal flag
+      ldi   oc_tabh,high(oc_tabd) 
    ret
 
 iw_diag:
@@ -1076,8 +1308,6 @@ iw_diag:
       st    y+,a              ;store data
       sts   rx_inx,yl         ;store pointers
       sts   rx_fill,yl
-      ;*** test diag stop immediate
-;      sbr   flags,(1<<deb_act)  ;prevent double_activation
       ldi   a,NMI_dis      ;no emulator interrupts during monitor
       out   ibus,a
       .ifdef irq_dis_real
@@ -1087,7 +1317,7 @@ iw_diag:
          out   ucsrb,a
       .endif
       sei
-      rjmp  debugger
+      jmp  debugger
       ;*** test diag stop immediate
    end   iw_diag_enter
 .ifdef ena_diag
@@ -1113,11 +1343,6 @@ diag_reset:
 
 ;reset of interrupt masks and flags
 irq_rs:
-;   in    a,timsk           ;clear t1 mask
-;   cbr   a,0x3c
-;   out   timsk,a
-;   ldi   a,0x3c            ;clear t1 flags
-;   out   tifr,a
    cbi   cbusddr,3         ;clear IRQ
    cbi   cbusddr,2         ;clear NMI
    sts   selftest,zero     ;clear saved flags
@@ -1145,17 +1370,27 @@ iw_retry:
 
 ;no mapping for write or normal exit
 iw_exit:
+   ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
+   sbrc  stat2,3           ;test decimal flag
+      ldi   oc_tabh,high(oc_tabd) 
+iw_exit2:
    cbr   flags,(1<<modify) ;unlock extended memory address after modify
    out   cbus,readmem      ;OE / read mode back on
-   ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
    op_decode
 
 ;no mapping for read
 ir_exit:
    ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
+   sbrc  stat2,3           ;test decimal flag
+      ldi   oc_tabh,high(oc_tabd) 
 rs_exit:
    ret
 
+.ifndef mmu_sel   
+   .equ mmu_rd  = ir_exit
+   .equ mmu_wrt = iw_exit
+   .equ mmu_rs  = rs_exit
+.endif
 .ifndef lcd_sel   
    .equ lcd_rd  = ir_exit
    .equ lcd_wrt = iw_exit
@@ -1276,12 +1511,16 @@ spr_data:
    cbi   spcr,spe          ;stop spi
    out   cbus,readmem      ;clear IO ext select & set read mode
    ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
+   sbrc  stat2,3           ;test decimal flag
+      ldi   oc_tabh,high(oc_tabd) 
    ret
 
 ;read data received during last write of the SPI
 spr_dat_lst:
    lds   operand,spi_rdat
    ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
+   sbrc  stat2,3           ;test decimal flag
+      ldi   oc_tabh,high(oc_tabd) 
    ret
 
 ;SPI reset
@@ -1316,25 +1555,28 @@ dma_spi_rb:
       lds   b,dma_tab_index
       cpi   a,3               ;current SPI read block (retry)?
       ifeq  spi_drb_retry
-         lds   xl,dma_tab+5            ;load in progress block count
-         lds   xh,dma_tab+6
+         lds   xl,dma_tab+6            ;load in progress block count
+         lds   xh,dma_tab+7
          rjmp  dma_spi_rb1
       end   spi_drb_retry
       cpi   a,0x13            ;previous SPI read block?
       ifeq_or  spi_drb
+      andi  a,0b11110111      ;0 or 8?
       cpi   a,0               ;previous set block address table?
       ifeq_and spi_drb
-      cpi   b,5               ;block address table valid?
+      cpi   b,6               ;block address table valid?
       ifeq     spi_drb
-         lds   xl,dma_tab+3      ;load block count
-         lds   xh,dma_tab+4
+         lds   xl,dma_tab+4      ;load block count
+         lds   xh,dma_tab+5
          rjmp  dma_spi_rb1
       end      spi_drb
    end   dma_spi_rssh
-   sts   dma_last_cmd,allon ;mark invalid sequence of command
+   ldi   a,0xe0               ;mark invalid sequence of command
+   sts   dma_last_cmd,a
    rjmp  iw_exit
 dma_spi_rb1:
    sts   dma_last_cmd,operand ;mark command in progress
+   load_mmu1               ;set banks as required
    .ifdef   spi_vat        ;do slave address translation
       lds   zl,dma_tab
       andi  zl,7              ;A0:2 only
@@ -1344,8 +1586,8 @@ dma_spi_rb1:
    .else
       lds   c,dma_tab         ;load slave select
    .endif
-   lds   zl,dma_tab+1         ;load memory address
-   lds   zh,dma_tab+2
+   lds   zl,dma_tab+2         ;load memory address
+   lds   zh,dma_tab+3
    in    a,spcr            ;load SPCR values
    mov   d,a               ;disabled
    sbr   a,(1<<spe)
@@ -1358,9 +1600,6 @@ dma_spi_rb1:
    out   timsk,a
    sbr   flags,(1<<dma_rpt) ;set dma interrupt modifier
    do       spi_drb_loop
-;      .ifdef irq_dis_real
-;         sbrs  stat2,2           ;all interrupts disable
-;      .endif
       sei
       ;read SPI
       out   spi_out,c         ;slave select
@@ -1372,8 +1611,8 @@ dma_spi_rb1:
       out   spcr,d            ;disable spi
       out   cbus,clear
       ;write memory
-      out   abuslo,zl         ;set memory address
-      out   abushi,zh
+      out   abushi,zh         ;set memory address
+      out   abuslo,zl
       out   cbus,writemem     ;WE, ~OE
       out   dbusout,a         ;dbus write
       adiw  z,1
@@ -1381,14 +1620,15 @@ dma_spi_rb1:
       sbiw  x,1
    loopne   spi_drb_loop
    out   dbusddr,zero      ;end writing memory
-   sts   dma_tab+1,zl      ;save next memory address
-   sts   dma_tab+2,zh
+   sts   dma_tab+2,zl      ;save next memory address
+   sts   dma_tab+3,zh
    ldi   a,0x13            ;last successful command was read
    sts   dma_last_cmd,a
    in    a,timsk           ;undo block single step
    sbr   a,1<<toie0
    out   timsk,a
    cbr   flags,(1<<dma_rpt) ;clear dma interrupt modifier
+   load_mmu_end            ;restore banks if needed
    rjmp  iw_exit
 ;DMA SPI write block
 dma_spi_wb:
@@ -1397,27 +1637,30 @@ dma_spi_wb:
    ifs   dma_spi_wssh
       lds   a,dma_last_cmd    ;verify last command and parameters
       lds   b,dma_tab_index
-      cpi   a,2               ;current SPI read block (retry)?
+      cpi   a,2               ;current SPI write block (retry)?
       ifeq  spi_dwb_retry
-         lds   xl,dma_tab+5      ;load in progress block count
-         lds   xh,dma_tab+6
+         lds   xl,dma_tab+6      ;load in progress block count
+         lds   xh,dma_tab+7
          rjmp  dma_spi_wb1
       end   spi_dwb_retry
-      cpi   a,0x12            ;previous SPI read block?
+      cpi   a,0x12            ;previous SPI write block?
       ifeq_or  spi_dwb
+      andi  a,0b11110111      ;0 or 8?
       cpi   a,0               ;previous set block address table?
       ifeq_and spi_dwb
-      cpi   b,5               ;block address table valid?
+      cpi   b,6               ;block address table valid?
       ifeq     spi_dwb
-         lds   xl,dma_tab+3      ;load block count
-         lds   xh,dma_tab+4
+         lds   xl,dma_tab+4      ;load block count
+         lds   xh,dma_tab+5
          rjmp  dma_spi_wb1
       end      spi_dwb
    end   dma_spi_wssh
-   sts   dma_last_cmd,allon ;mark invalid sequence of command
+   ldi   a,0xe0               ;mark invalid sequence of command
+   sts   dma_last_cmd,a
    rjmp  iw_exit
 dma_spi_wb1:
    sts   dma_last_cmd,operand ;mark command in progress
+   load_mmu1               ;set banks as required
    .ifdef   spi_vat        ;do slave address translation
       lds   zl,dma_tab
       andi  zl,7              ;A0:2 only
@@ -1427,8 +1670,8 @@ dma_spi_wb1:
    .else
       lds   c,dma_tab         ;load slave select
    .endif
-   lds   zl,dma_tab+1      ;load memory address
-   lds   zh,dma_tab+2
+   lds   zl,dma_tab+2      ;load memory address
+   lds   zh,dma_tab+3
    in    a,spcr            ;load SPCR values
    mov   d,a               ;disabled
    sbr   a,(1<<spe)
@@ -1440,11 +1683,8 @@ dma_spi_wb1:
    sbr   flags,(1<<dma_rpt) ;set dma interrupt modifier
    do       spi_dwb_loop
       ;read memory
-      out   abuslo,zl
       out   abushi,zh
-;      .ifdef irq_dis_real
-;         sbrs  stat2,2           ;all interrupts disable
-;      .endif
+      out   abuslo,zl
             sei
             nop
             cli
@@ -1461,30 +1701,36 @@ dma_spi_wb1:
       out   cbus,readmem
       sbiw  x,1
    loopne   spi_dwb_loop
-   sts   dma_tab+1,zl      ;save next memory address
-   sts   dma_tab+2,zh
+   sts   dma_tab+2,zl      ;save next memory address
+   sts   dma_tab+3,zh
    ldi   a,0x12            ;last successful command was read
    sts   dma_last_cmd,a
    in    a,timsk           ;undo block single step
    sbr   a,1<<toie0
    out   timsk,a
    cbr   flags,(1<<dma_rpt) ;clear dma interrupt modifier
+   load_mmu_end            ;restore banks if needed
    rjmp  iw_exit
 .else
    .equ  spw_cmd     = iw_exit
    .equ  spw_data    = iw_exit
-   .equ  dma_spi_wb  = dma_cmd_inv
    .equ  spr_data    = ir_exit
    .equ  spr_dat_lst = ir_exit
-   .equ  dma_spi_rb  = dma_cmd_inv
    .equ  spi_rs      = rs_exit
+dma_spi_rb:
+dma_spi_wb:
 .endif
 
 ;********************************************************************
 ;
-;     DMA for SPI, I2C and EEPROM or SD card load & save
+;     DMA for SPI, I2C and EEPROM (or SD card) load & save
+;        additional bank switch commands with optional MMU
 ;
 ;********************************************************************
+dma_cmd_inv:
+   ldi   a,0xec               ;error: command not supported
+   sts   dma_last_cmd,a
+   rjmp  iw_exit
 dmw_cmd:
    mov   a,operand
    cpi   a,dma_ct_end-dma_cmd_tab
@@ -1495,9 +1741,6 @@ dmw_cmd:
       adc   zh,zero
       ijmp
    end   dmw_cmd_valid
-dma_cmd_inv:
-   sts   dma_last_cmd,allon   ;set invalid command
-   rjmp  iw_exit
 dma_cmd_tab:                  ;table of valid DMA commands
    rjmp  dma_set_tab   
    rjmp  dma_set_tab
@@ -1507,33 +1750,68 @@ dma_cmd_tab:                  ;table of valid DMA commands
    rjmp  dma_i2c_rb
    rjmp  dma_eep_save
    rjmp  dma_eep_load
+   .ifdef mmu_sel
+      rjmp  dma_set_bstab
+      rjmp  dma_set_bstab
+      rjmp  dma_xmem_copy
+      rjmp  dma_xmem_copy
+   .endif
 dma_ct_end:
 
 ;dma set block transfer table:
-;        SPI (cmd=0)    I2C (cmd=1)    EEPROM (cmd=0)
-;  byte  slave address  don't care     program number
+;
+;        SPI (cmd=0/8)  I2C (cmd=1/9)  EEPROM (cmd=0/8)
+;  byte  slave address  ---            program number
+; (byte  bank select    bank select    bank select) if 8 or 9
 ;  word  start address  start address  start address
-;  word  byte count     byte count     end address
+;  word  byte count     byte count     (end address) save only 
+;
+;        XMEM copy (cmd=9)    read after XMEM copy command (stat=1A)
+;  byte  ---                  target bank select
+;  byte  source bank select   source bank select
+;  byte  source page address  source page address
+;  byte  target bank select   target page address
+;  byte  target page select   temporary byte count
+;  byte  page count           page count
 
 dma_set_tab:
-   sts   dma_tab_index,operand ;1 = skip 1st byte
-   sts   dma_last_cmd,operand       
+   sts   dma_tab_index,operand ;1 = skip 1st byte for I2C
+   sts   dma_last_cmd,operand 
+   sts   dma_tab+1,allon   ;no bank select!     
    rjmp  iw_exit
+
+   .ifdef mmu_sel
+dma_set_bstab:
+      andi  a,0b1             ;mask index
+      sts   dma_tab_index,a   ;1 = skip 1st byte for I2C
+      sts   dma_last_cmd,operand 
+      sts   dma_tab+1,zero    ;with bank select!     
+      rjmp  iw_exit
+   .endif
 
 ;dma read block transfer status
 dmr_stat:
    lds   operand,dma_last_cmd ;dummy response
    ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
+   sbrc  stat2,3           ;test decimal flag
+      ldi   oc_tabh,high(oc_tabd) 
    ret
 
 ;dma write block transfer table
 dmw_data:
    lds   a,dma_last_cmd    ;set tab?
-   cpi   a,2   
-   iflo_and dmw_data_valid
+   andi  a,0b11110110      ;0, 1, 8, 9
+   ifeq_and dmw_data_valid
    lds   a,dma_tab_index
-   cpi   a,5               ;tab not already filled?
+   cpi   a,6               ;tab not already filled?
    iflo     dmw_data_valid
+      cpi   a,1            ;skip bank select?
+      ifeq_and dmw_data_bs
+      lds   c,dma_tab+1
+      cp    c,allon
+      ifeq     dmw_data_bs
+         inc   a
+      end      dmw_data_bs
       ldi   zl,low(dma_tab)
       ldi   zh,high(dma_tab)
       add   zl,a
@@ -1543,15 +1821,16 @@ dmw_data:
       sts   dma_tab_index,a
       rjmp  iw_exit
    end      dmw_data_valid
-   sts   dma_last_cmd,allon   ;invalid sequence
-   sts   dma_tab_index,allon
+   ldi   a,0xe0               ;mark invalid parameter count
+   sts   dma_last_cmd,a
+   sts   dma_tab_index,zero
    rjmp  iw_exit
 
 ;dma read block transfer table
 ;  used on load from EEPROM to fetch end address
 dmr_data:
    lds   a,dma_tab_index
-   cpi   a,5               ;end of tab?
+   cpi   a,6               ;end of tab?
    ifsh     dmr_tab_end
       mov   a,zero            ;start over
    end   dmr_tab_end
@@ -1562,9 +1841,154 @@ dmr_data:
    ld    operand,z
    inc   a
    sts   dma_tab_index,a
-   sts   dma_last_cmd,allon   ;can't continue
+   ldi   a,0x10
+   sts   dma_last_cmd,a    ;can't continue
    ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
+   sbrc  stat2,3           ;test decimal flag
+      ldi   oc_tabh,high(oc_tabd) 
    ret
+
+;dma extended memory copy/swap
+;  copy/swap RAM pages between memory banks
+.ifdef mmu_sel
+dma_xmem_copy:
+   lds   a,dma_last_cmd    ;verify last command and parameters
+   lds   b,dma_tab_index
+   cp    a,operand         ;current xmem copy or swap (retry)?
+   ifeq  xmc_retry
+      lds   xl,dma_tab+6      ;load in progress byte count
+      lds   xh,dma_tab+7
+      rjmp  xmc_go
+   end   xmc_retry
+   cpi   a,9               ;previous set dma table?
+   ifeq_and xmc_new
+   cpi   b,6               ;dma table complete?
+   ifeq     xmc_new
+      lds   a,dma_tab+3       ;move target bank
+      sts   dma_tab,a
+      clr   xl                ;byte count
+      lds   xh,dma_tab+5      ;page count
+      lds   zh,dma_tab+4      ;target page
+      rjmp  xmc_go2
+   end      xmc_new
+   ori   a,1               ;previous xmem copy or swap?
+   cpi   a,0x1b
+   ifeq  xmc_rep
+      lds   xl,dma_tab+4      ;load byte count
+      lds   xh,dma_tab+5
+      rjmp  xmc_go
+   end   xmc_rep
+   ldi   a,0xe0               ;mark invalid sequence of command
+   sts   dma_last_cmd,a
+   rjmp  iw_exit
+xmc_go:
+   lds   zh,dma_tab+3         ;target page
+xmc_go2:
+   lds   zl,dma_tab+2         ;source page
+   sbr   zh,0x80              ;upper 2 pages = target
+   cbr   zl,0x80              ;lower 2 pages = source
+   mov   a,xh                 ;check count valid
+   dec   a
+   cpi   a,0x80               ;valid range 0x01-0x80?
+   ifsh_or  xmc_bad_count
+   add   a,zl
+   cpi   a,0x80               ;enough source pages in bank?
+   ifsh_or  xmc_bad_count
+   mov   a,xh
+   dec   a
+   add   a,zl                 ;enough target pages in bank?
+   ifcs     xmc_bad_count
+      ldi   a,0xe2               ;mark invalid count
+      sts   dma_last_cmd,a
+      rjmp  iw_exit
+   end      xmc_bad_count
+   sts   dma_last_cmd,operand ;mark command in progress
+   load_mmu2
+   in    a,timsk           ;block single step on retry
+   cbr   a,1<<toie0
+   out   timsk,a
+   sbr   flags,(1<<dma_rpt) ;set dma interrupt modifier
+   sbrc  operand,0         ;copy or swap?
+   ifs   xm_copy
+      do       xmc_block
+         do       xmc_page
+            out   abushi,zl         ;source page
+            out   abuslo,xl         ;current byte
+                  sei               
+                  nop               ;allow interrupts
+                  cli
+            wait_data_valid 3
+            in    a,dbusin
+            out   abushi,zh         ;target page
+            out   cbus,writemem     ;WE, ~OE
+            out   dbusout,a         ;dbus write
+            out   dbusddr,allon     ;output data valid
+            out   cbus,clear        ;~WE / write cycle ends 180ns/16MHz
+            out   dbusddr,zero      ;data hold ends after 60ns
+            out   cbus,readmem      ;OE / read mode back on
+            inc   xl                ;byte count
+         loopne   xmc_page
+         inc   zl                ;source page
+         inc   zh                ;target page
+         dec   xh                ;page count
+      loopne   xmc_block
+   else  xm_copy
+      out   abushi,zl         ;source page
+      out   abuslo,xl         ;current byte
+      nop2
+      do       xms_block
+         do       xms_page
+            wait_data_valid 3
+                  out   abushi,zh   ;target page
+                  in    a,dbusin
+            wait_data_valid 3
+                  sei               ;allow interrupts
+                  nop               
+                  cli
+            in    c,dbusin
+            out   cbus,writemem     ;WE, ~OE
+            out   dbusout,a         ;dbus write
+            out   dbusddr,allon     ;output data valid
+            out   cbus,clear        ;~WE / write cycle ends 180ns/16MHz
+            out   abushi,zl         ;source page
+            inc   xl                ;byte count
+            out   cbus,writemem     ;WE, ~OE
+            out   dbusout,c         ;dbus write
+            out   cbus,clear        ;~WE / write cycle ends 180ns/16MHz
+            out   dbusddr,zero      ;data hold ends after 60ns
+            out   cbus,readmem      ;OE / read mode back on
+            out   abuslo,xl         ;next byte
+         loopne   xms_page
+         inc   zl                ;source page
+         out   abushi,zl         ;new page
+         inc   zh                ;target page
+         dec   xh                ;page count
+      loopne   xms_block
+   end   xm_copy
+   sts   dma_tab+2,zl      ;save next source page
+   sts   dma_tab+3,zh      ;save next target page
+   andi  zl,0x80           ;last source page?
+   ifeq  xmc_inc_srcbs
+      lds   a,dma_tab+1       ;increment source bank
+      inc   a
+      sts   dma_tab+1,a
+   end   xmc_inc_srcbs
+   andi  zh,0x80           ;last target page?
+   ifeq  xmc_inc_tgtbs
+      lds   a,dma_tab         ;increment target bank
+      inc   a
+      sts   dma_tab,a
+   end   xmc_inc_tgtbs
+   mov   a,operand         ;last successful command was xmem copy or swap
+   ori   a,0x10
+   sts   dma_last_cmd,a
+   in    a,timsk           ;undo block single step
+   sbr   a,1<<toie0
+   out   timsk,a
+   cbr   flags,(1<<dma_rpt) ;clear dma interrupt modifier
+   load_mmu_end            ;restore banks if needed
+   rjmp  iw_exit
+.endif
 
 .ifdef i2c_sel
 ;********************************************************************
@@ -1648,6 +2072,8 @@ i2c_data_rd:
       mov   operand,zero
    end   i2c_read_ok
    ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
+   sbrc  stat2,3           ;test decimal flag
+      ldi   oc_tabh,high(oc_tabd) 
    ret
 ;
 ; write i2c data if not stopped or previous read
@@ -1796,6 +2222,8 @@ i2c_stat:
    .endif
    out   cbus,readmem      ;clear IO select & set read mode
    ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
+   sbrc  stat2,3           ;test decimal flag
+      ldi   oc_tabh,high(oc_tabd) 
    ret
    
 ;
@@ -1819,31 +2247,33 @@ dma_i2c_rb:
    lds   b,dma_tab_index
    cpi   a,5               ;current i2c read block (retry)?
    ifeq  i2c_drb_retry
-      lds   xl,dma_tab+5            ;load in progress block count
-      lds   xh,dma_tab+6
+      lds   xl,dma_tab+6            ;load in progress block count
+      lds   xh,dma_tab+7
       rjmp  dma_i2c_rb1
    end   i2c_drb_retry
    cpi   a,0x15            ;previous i2c read block?
    ifeq_or  i2c_drb
+   andi  a,0b11110111      ;1 or 9?
    cpi   a,1               ;previous set block address table?
    ifeq_and i2c_drb
-   cpi   b,5               ;block address table valid?
+   cpi   b,6               ;block address table valid?
    ifeq     i2c_drb
-      lds   xl,dma_tab+3      ;load block count
-      lds   xh,dma_tab+4
+      lds   xl,dma_tab+4      ;load block count
+      lds   xh,dma_tab+5
       rjmp  dma_i2c_rb1
    end      i2c_drb
 dma_i2c_rbfail:
-   sts   dma_last_cmd,allon ;mark invalid sequence of command
-   rjmp  iw_exit
+   ldi   a,0xe0               ;mark invalid sequence of command
+   sts   dma_last_cmd,a
 dma_i2c_rb1:
    sts   dma_last_cmd,operand ;mark command in progress
-   lds   zl,dma_tab+1      ;load memory address
-   lds   zh,dma_tab+2
+   lds   zl,dma_tab+2      ;load memory address
+   lds   zh,dma_tab+3
 
    lds   yl,i2c_statreg    ;load current I2C status
    sbrc  yl,0              ;test interface stopped
       rjmp  dma_i2c_rbfail
+   load_mmu1               ;set banks as required
    out   cbus,clear        ;readmode off
    rcall i2c_open
    in    c,cbus            ;save I2C register enable
@@ -1867,8 +2297,8 @@ dma_i2c_rb1:
       out   cbus,clear        ;clear IO select
       ;write memory
       out   dbusddr,allon     ;prepare to write mem
-      out   abuslo,zl         ;set memory address
-      out   abushi,zh
+      out   abushi,zh         ;set memory address
+      out   abuslo,zl
       out   cbus,writemem     ;WE, ~OE
       out   dbusout,a         ;dbus write
       adiw  z,1
@@ -1877,9 +2307,6 @@ dma_i2c_rb1:
    exiteq   i2c_drb_loop
       ;read i2c
       out   dbusout,allon     ;float all outputs high
-;      .ifdef irq_dis_real
-;         sbrs  stat2,2           ;all interrupts disable
-;      .endif
       sei
       out   dbusddr,zero
       cli
@@ -1891,14 +2318,15 @@ dma_i2c_rb1:
       rcall i2c_putack
    loop     i2c_drb_loop
    out   dbusddr,zero      ;end writing to memory
-   sts   dma_tab+1,zl      ;save next memory address
-   sts   dma_tab+2,zh
+   sts   dma_tab+2,zl      ;save next memory address
+   sts   dma_tab+3,zh
    ldi   a,0x15            ;last successful command was read
    sts   dma_last_cmd,a
    in    a,timsk           ;undo block single step
    sbr   a,1<<toie0
    out   timsk,a
    cbr   flags,(1<<dma_rpt) ;clear dma interrupt modifier
+   load_mmu_end            ;restore banks if needed
    rjmp  iw_exit
 
 ;DMA I2C write block
@@ -1907,27 +2335,29 @@ dma_i2c_wb:
    lds   b,dma_tab_index
    cpi   a,4               ;current i2c read block (retry)?
    ifeq  i2c_dwb_retry
-      lds   xl,dma_tab+5      ;load in progress block count
-      lds   xh,dma_tab+6
+      lds   xl,dma_tab+6      ;load in progress block count
+      lds   xh,dma_tab+7
       rjmp  dma_i2c_wb1
    end   i2c_dwb_retry
    cpi   a,0x14            ;previous i2c read block?
    ifeq_or  i2c_dwb
+   andi  a,0b11110111      ;1 or 9?
    cpi   a,1               ;previous set block address table?
    ifeq_and i2c_dwb
-   cpi   b,5               ;block address table valid?
+   cpi   b,6               ;block address table valid?
    ifeq     i2c_dwb
-      lds   xl,dma_tab+3      ;load block count
-      lds   xh,dma_tab+4
+      lds   xl,dma_tab+4      ;load block count
+      lds   xh,dma_tab+5
       rjmp  dma_i2c_wb1
    end      i2c_dwb
 dma_i2c_rwfail:
-   sts   dma_last_cmd,allon ;mark invalid sequence of command
+   ldi   a,0xe0            ;mark invalid sequence of command
+   sts   dma_last_cmd,a
    rjmp  iw_exit
 dma_i2c_wb1:
    sts   dma_last_cmd,operand ;mark command in progress
-   lds   zl,dma_tab+1      ;load memory address
-   lds   zh,dma_tab+2
+   lds   zl,dma_tab+2      ;load memory address
+   lds   zh,dma_tab+3
    prep_io_select i2c_sel
    mov   e,b               ;save I2C register idle
    mov   d,yl              ;save I2C register active
@@ -1936,17 +2366,15 @@ dma_i2c_wb1:
    mov   a,yl
    andi  a,0b1001          ;not stopped and not read?
    brne  dma_i2c_rwfail
+   load_mmu1               ;set banks as required
    in    a,timsk           ;block single step on retry
    cbr   a,1<<toie0
    out   timsk,a
    sbr   flags,(1<<dma_rpt) ;set dma interrupt modifier
    do       i2c_dwb_loop
       ;read memory
-      out   abuslo,zl
       out   abushi,zh
-;      .ifdef irq_dis_real
-;         sbrs  stat2,2           ;all interrupts disable
-;      .endif
+      out   abuslo,zl
             sei
             nop
             cli
@@ -1980,24 +2408,23 @@ dma_i2c_wb1:
          out   abushi,e          ;close i2c interface
       .endif
       out   cbus,readmem
-      mov   a,allon           ;mark dma failed unless...
+      ldi   a,0xe0           ;device failed unless...
       sbiw  x,1
       ifeq  i2c_dwb_end_nak   ;...it is at the end of the block
          ldi   a,0x14
       end   i2c_dwb_end_nak
    end   i2c_dwb_ack
    sts   dma_last_cmd,a
-   sts   dma_tab+1,zl      ;save next memory address
-   sts   dma_tab+2,zh
+   sts   dma_tab+2,zl      ;save next memory address
+   sts   dma_tab+3,zh
    in    a,timsk           ;undo block single step
    sbr   a,1<<toie0
    out   timsk,a
    cbr   flags,(1<<dma_rpt) ;clear dma interrupt modifier
+   load_mmu_end            ;restore banks if needed
    rjmp  iw_exit
 
 ;*********************
-
-
 ;
 ; wait_i2c  @0 = # of cycles, @1 = cyles already used 
 ;
@@ -2063,13 +2490,13 @@ i2c_reset:
    rcall i2c_open
 i2c_reset_rs:
    sbi   i2c_ddr,i2c_res   ;optional hw reset
+   clt                     ;set low speed
    wait_i2c 190,0          ;allow reset to disengage slaves
    clr   zl                ;clear all
    sbic  i2c_in,i2c_scl    ;SCL stuck low?
    ifs   i2c_stuck         ;set interface not usable status
       sbr   zl,0b100001       ;set stop & stuck
    else  i2c_stuck         ;reset for devices without hw-reset
-      clt                     ;set low speed
       ldi   i2c_data,0xff     ;9 clocks with nak
       rcall i2c_write
       sbic  i2c_in,i2c_sda    ;SDA stuck low?
@@ -2233,7 +2660,14 @@ eep_open:
    in    c,cbus            ;selected IO (cbus)
    ret 
 eep_no_device:
-   PrintStr err_no_eep     ;" SPI/I2C EEPROM not found"
+   sbrs  flags,deb_act
+   ifs   eep_no_dev_msg
+      PrintStr err_no_eep     ;" SPI/I2C EEPROM not found"
+   else  eep_no_dev_msg
+      ldi   a,0xed            ;error: device or bus not functional
+      sts   dma_last_cmd,a
+;      cbr   flags,(1<<dma_rpt) ;clr dma interrupt modifier
+   end   eep_no_dev_msg
    jmp   skip_main
 ;
 ; EEPROM write 1 Byte, select new slot if necessary
@@ -2326,7 +2760,14 @@ eep_write:
    ret
 
 eep_full:               ;no more slots
-   PrintStr err_eep_full   ;" EEPROM full"
+   sbrs  flags,deb_act
+   ifs   eep_full_msg
+      PrintStr err_eep_full   ;" EEPROM full"
+   else  eep_full_msg
+      ldi   a,0xee            ;error: EEPROM full
+      sts   dma_last_cmd,a
+;      cbr   flags,(1<<dma_rpt) ;clr dma interrupt modifier
+   end   eep_full_msg
 ;
 ; EEP error during save
 ;
@@ -2365,7 +2806,7 @@ eep_write_close:
 eep_close:
    ;disconnect SPI/I2C, connect RAM
    .ifdef spi_eep_adr
-      out   dbusddr,zero      ;dbus = output
+      out   dbusddr,zero      ;dbus = input
    .endif
    .if (io_sel_direct > 0)
       out   abushi,e
@@ -2419,7 +2860,6 @@ eep_load_prog:
    PrintStr eep_prog       ;10,13,"Program "
    lds   a,prog_num        ;prog#
    rcall PrintHex
-   cbr   flags,(1<<emu_run) ;force emulator halted  
    clr   xl                ;check prog exists
    out   eearh,one
    lds   a,prog_num
@@ -2467,8 +2907,8 @@ eep_load_prog:
          .else
             out   dbusddr,allon     ;dbus = output
          .endif
-         out   abuslo,zl 
          out   abushi,zh
+         out   abuslo,zl 
          out   cbus,writemem     ;WE, ~OE
          out   dbusout,a         ;dbus write
          adiw  z,1
@@ -2492,13 +2932,18 @@ eep_load_prog:
       mov   xl,a
       tst   xl
    loopne   eep_load_loop
+.ifdef mmu_sel
+   lds   a,mmu_sync        ;loaded to emulator bank?
+   tst   a
+   ifne_and eep_load_pc
+.endif
    rcall eep_read          ;read PCH
    tst   a                 ;is valid?
-   ifne  eep_load_pc
+   ifne     eep_load_pc
       mov   pch,a             ;set PC
       rcall eep_read
       mov   pcl,a
-   end   eep_load_pc
+   end      eep_load_pc
    PrintStr eep_loaded     ;" loaded"
    .ifdef spi_eep_adr
       ldi   a,spi_idle     ;close spi slave
@@ -2570,7 +3015,13 @@ eep_read:
    ret
 ; overran the last slot, no ending count 0x00
 eep_read_overrun:
-   PrintStr err_corrupt    ;" corrupted"
+   sbrs  flags,deb_act
+   ifs   eep_over_msg
+      PrintStr err_corrupt    ;" corrupted"
+   else  eep_over_msg
+      ldi   a,0xe9            ;error: program corrupted
+      sts   dma_last_cmd,a
+   end   eep_over_msg
    pop   a                 ;remove return address
    pop   a
    ldi   a,1               ;post returncode fail
@@ -2582,29 +3033,34 @@ eep_read_overrun:
 dma_eep_save:
    lds   a,dma_last_cmd
    lds   b,dma_tab_index
-   sts   dma_last_cmd,allon ;mark invalid sequence of command
+;   sts   dma_last_cmd,allon ;mark invalid sequence of command
+   andi  a,0b11110111      ;0 or 8?
    cpi   a,0               ;previous set block address table?
    ifne_or  eep_ds_inv
-   cpi   b,5               ;block address table valid?
+   cpi   b,6               ;block address table valid?
    ifne_or  eep_ds_inv
    lds   a,dma_tab         ;program number valid?
    cpi   a,0xff
    ifeq     eep_ds_inv
+      ldi   a,0xe0            ;error: sequence or parameter count
+      sts   dma_last_cmd,a
       rjmp  iw_exit           ;exit - invalid parameters
    end      eep_ds_inv
+;   sbr   flags,(1<<dma_rpt) ;set dma interrupt modifier
    sts   prog_num,a
    in    b,spl             ;save sp - allows sub to exit
    sts   sp_save,b
    in    b,sph
    sts   sp_save+1,b
+   load_mmu1
    rcall eep_open
-   PrintStr eep_prog       ;10,13,"Program "
-   lds   a,prog_num        ;prog#
-   rcall PrintHex
-   lds   zl,dma_tab+1      ;load memory address
-   lds   zh,dma_tab+2
-   lds   xl,dma_tab+3      ;load block count
-   lds   xh,dma_tab+4
+;   PrintStr eep_prog       ;10,13,"Program "
+;   lds   a,prog_num        ;prog#
+;   rcall PrintHex
+   lds   zl,dma_tab+2      ;load memory address
+   lds   zh,dma_tab+3
+   lds   xl,dma_tab+4      ;load block count
+   lds   xh,dma_tab+5
    ldi   yl,0              ;initial slot allocation
    ldi   yh,0
    out   eearh,one
@@ -2632,8 +3088,8 @@ dma_eep_save:
       .ifdef spi_eep_adr
          cbi   spcr,spe       ;disable SPI
       .endif
-      out   abuslo,zl         ;read from RAM
-      out   abushi,zh
+      out   abushi,zh         ;read from RAM
+      out   abuslo,zl
             adiw  z,1            ;next address
       wait_data_valid 1
       in    a,dbusin
@@ -2661,30 +3117,39 @@ dma_eep_save:
       sts      i2c_statreg,zl
    .endif
    rcall eep_write_close
-   PrintStr eep_saved      ;" saved"
-   rcall crlf
+;   PrintStr eep_saved      ;" saved"
+;   rcall crlf
    ldi   a,0x16            ;last successful command was read
    sts   dma_last_cmd,a
+;   cbr   flags,(1<<dma_rpt) ;clr dma interrupt modifier
+   load_mmu_end
    rjmp  iw_exit
 
 ;dma load program
 dma_eep_load:
    lds   a,dma_last_cmd
    lds   b,dma_tab_index
-   sts   dma_last_cmd,allon ;mark invalid sequence of command
+;   sts   dma_last_cmd,allon ;mark invalid sequence of command
+   andi  a,0b11110111      ;0 or 8?
    cpi   a,0               ;previous set block address table?
    ifne_or  eep_dl_inv
-   cpi   b,3               ;block address table valid?
-   ifne_or  eep_dl_inv
-   lds   a,dma_tab         ;program number valid?
-   cpi   a,0xff
-   ifeq     eep_dl_inv
+   cpi   b,4               ;block address table valid?
+   ifne     eep_dl_inv
+      ldi   a,0xe0            ;error: sequence or parameter count
+      sts   dma_last_cmd,a
       rjmp  iw_exit           ;exit - invalid parameters
    end      eep_dl_inv
+   lds   a,dma_tab         ;program number valid?
+   cpi   a,0xff
+   ifeq     eep_dl_inv_prg
+      ldi   a,0xef            ;error: program not found
+      sts   dma_last_cmd,a
+      rjmp  iw_exit           ;exit - invalid parameters
+   end     eep_dl_inv_prg
    sts   prog_num,a
-   PrintStr eep_prog       ;10,13,"Program "
-   lds   a,prog_num        ;prog#
-   rcall PrintHex
+;   PrintStr eep_prog       ;10,13,"Program "
+;   lds   a,prog_num        ;prog#
+;   rcall PrintHex
    clr   c        ;check prog exists
    out   eearh,one
    lds   a,prog_num
@@ -2696,29 +3161,34 @@ dma_eep_load:
    exiteq   eep_app_scan_loop
       inc   c              ;all slots done?
       ifeq  eep_app_load_bad_prog
-         PrintStr eep_notfound  ;" not found"
+         ldi   a,0xef            ;error: program not found
+         sts   dma_last_cmd,a
+;         PrintStr eep_notfound  ;" not found"
          rjmp  eep_app_read_exit
       end   eep_app_load_bad_prog
    loop     eep_app_scan_loop
+   load_mmu1
    rcall eep_open
    ldi   yl,0           ;start reading from 1st slot
    ldi   yh,0
    rcall eep_read
    tst   a
    ifne  eep_app_file_incompat
-      PrintStr bad_format  ;" incompatible format"
+      ldi   a,0xea            ;error: incompatible format
+      sts   dma_last_cmd,a
+;      PrintStr bad_format  ;" incompatible format"
       rjmp  eep_app_read_exit2
    end   eep_app_file_incompat
-   lds   zl,dma_tab+1      ;load memory address
-   lds   zh,dma_tab+2
+   lds   zl,dma_tab+2      ;load memory address
+   lds   zh,dma_tab+3
    rcall eep_read             ;read count - set end address
    mov   xl,a
    rcall eep_read
    mov   xh,a
    add   xl,zl
-   sts   dma_tab+3,xl
+   sts   dma_tab+4,xl
    adc   xh,zh
-   sts   dma_tab+4,xh
+   sts   dma_tab+5,xh
    .ifdef spi_eep_adr
       out   dbusddr,allon
    .endif
@@ -2739,8 +3209,8 @@ dma_eep_load:
       .else
          out   dbusddr,allon     ;dbus = output
       .endif
-      out   abuslo,zl         ;set write address 
-      out   abushi,zh
+      out   abushi,zh         ;set write address 
+      out   abuslo,zl
       out   cbus,writemem     ;WE, ~OE
       out   dbusout,a         ;dbus write
       adiw  z,1               ;next address
@@ -2759,7 +3229,7 @@ dma_eep_load:
       .endif
       out   cbus,c            ;set IO select
    loop     eep_app_load_loop
-   PrintStr eep_loaded     ;" loaded"
+;   PrintStr eep_loaded     ;" loaded"
    ldi   a,0x17            ;last successful command was read
    sts   dma_last_cmd,a
    .ifndef spi_eep_adr
@@ -2777,9 +3247,10 @@ eep_app_read_exit2:
       rcall i2c_stop
    .endif
 eep_app_read_exit:
-   rcall crlf
+;   rcall crlf
    rcall eep_close
-   rjmp  iw_exit
+   load_mmu_end
+   jmp   iw_exit
 
 eep_info1:     .db   13,10,"EEPROM autoload ",0,0
 eep_info2:     .db   " - ",0
@@ -2789,7 +3260,7 @@ eep_none:      .db   "none",0,0
 eep_notfound:  .db   " not found",0,0
 eep_prog:      .db   13,10,"Program ",0,0
 eep_loaded:    .db   " loaded",0
-eep_saved:     .db   " saved",0,0
+;eep_saved:     .db   " saved",0,0
 err_eep_full:  .db   " EEPROM full",0,0
    .ifdef spi_eep_adr
 err_no_eep:    .db   13,10,"SPI EEPROM not found",0,0

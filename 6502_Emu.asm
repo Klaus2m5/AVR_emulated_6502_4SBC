@@ -4,7 +4,7 @@
 ;
 ; An AVR emulates a 6502 with >2MHz speed
 ;
-; Copyright (C) 2013-2015  Klaus Dormann
+; Copyright (C) 2013-2018  Klaus Dormann
 ;
 ; This program is free software: you can redistribute it and/or modify
 ; it under the terms of the GNU General Public License as published by
@@ -21,7 +21,8 @@
 ;
 ; contact info at http://2m5.de or email K@2m5.de
 ;
-#define   version "0.83c"   ;makes a printable version number
+#define   version "0.84 "     ;makes a printable version number
+.set base_version = 840       ;version * 1000
 ;
 ; version history:
 ;  0.8   24-jan-13   1st version distributed for testing
@@ -41,8 +42,13 @@
 ;  0.83b 24-jan-15   fixed ATMega32 interrupt table, fixed break hanging on some terminals
 ;                    reduced interrupt latency caused by the monitor waiting for tx buffer
 ;  0.83c 24-nov-15   fixed dma load program corrupted message due to false count in
-;                      dma save program
-;
+;                    dma save program
+;  0.84  21-feb-18   improved ADC/SBC binary/decimal switch (thanks to Peter!)
+;                    added a switch to force hardware compatible results on invalid BCD
+;                    added MMU support to switch banks, copy or swap pages between banks
+;                    added SPI/I2C DMA support to read, write, save or load banks
+;                    added IO subprocessor support
+;                    
 ;
 ; ATMEGA16 & ATMEGA32 fuse settings:
 ;   16 MHz crystal
@@ -87,7 +93,8 @@
 ;   negative, overflow & zero-flags may be altered after a decimal add
 ;   or subtract, but have no valid meaning and may not be identical to real
 ;   hardware. The result of a decimal operation with non decimal operands
-;   (any nibble >9) may not match the result of a hardware 6502
+;   (any nibble >9) may not match the result of a hardware 6502, unless
+;   dec_mode_extended is configured.
 ;
 ; In the CMOS emulation core all instructions are valid and if not defined
 ;   otherwise, will be executed as NOP instructions of various length in bytes
@@ -95,7 +102,8 @@
 ;
 ;   A decimal operation with valid decimal numbers will have a valid result
 ;   and valid NZC flags. The result and flags of decimal add or subtract with 
-;   invalid BCD operands may not match a real 65C02.
+;   invalid BCD operands may not match a real 65C02, unless dec_mode_extended
+;   is configured.
 
  
             .NOLIST
@@ -139,6 +147,43 @@
          .equ eep_vld = 1
       .endif
    .endif
+.endif
+
+;config based dma valid
+.ifdef iomap
+   .if defined(spi_sel) || defined(i2c_sel) || defined(mmu_sel)
+      .equ dma_vld = 1
+   .endif
+.endif
+
+;config based mmu parms & macros
+.if defined(mmu_sel) && defined(iomap)
+   .set  bank_sel = mmu_sel   ;precharge mmu IO select pins for MMU
+   .set  io_strobe_pol = 1    ;preset to error
+   .if   bank_sel > 9         ;generate mmu strobe pin
+      .set  bank_sel = bank_sel -10
+      .if   bank_sel < 8 
+         .set  bank_sel_iox = ios1_default ;precharge IO-select register  
+         .set  io_strobe_pol = !((ios1_default >> bank_sel) & 1)
+         .set  bank_sel_direct = 6 ;bit to enable extension register
+      .else
+         .set  bank_sel = bank_sel -10
+         .if   bank_sel < 8 
+            .set  bank_sel_iox = ios2_default ;precharge IO-select register  
+            .set  io_strobe_pol = !((ios2_default >> bank_sel) & 1)
+            .set  bank_sel_direct = 7 ;bit to enable extension register
+         .else
+            .set  bank_sel = bank_sel -10
+            .set  bank_sel_iox = ios3_default ;precharge IO-select register  
+            .set  io_strobe_pol = !((ios3_default >> bank_sel) & 1)
+            .set  bank_sel_direct = 2 ;bit to enable extension register
+         .endif
+      .endif
+   .endif
+   .if   io_strobe_pol
+      .error "mmu_sel must be active low on an I/O expansion pin"
+   .endif
+   .equ  mmu_vld = 1       ;valid mmu configured
 .endif
 
 ; reserved registers
@@ -229,7 +274,7 @@ alignfromhere:
 ;
 .DSEG
 ;(D) command line buffer
-cmd_buf:    .byte 48          ;48 character command line buffer
+cmd_buf:    .byte 44          ;44 character command line buffer
 cmd_end:    .byte 1           ;+1 for end of string marker
 cmd_inx:    .byte 1           ;input index to cmd_buf
 cmd_esc_timer:                ;10ms increments to discard esc sequence
@@ -244,9 +289,10 @@ sp_save:    .byte 2           ;saved sp for mainloop to allow subs to exit
 adr_limit:  .byte 2           ;maximum address +1 accepted in deb_adr
 rstflag:    .byte 1           ;reset flags from mcucsr
 prog_num:   .byte 1           ;program number for EEP save/load, 0xff if closed
-brkpt_lo:   .byte 10          ;breakpoint address low
-brkpt_hi:   .byte 10          ;breakpoint address high
-brkpt_op:   .byte 10          ;breakpoint original opcode
+brkpt_lo:   .byte 8           ;breakpoint address low
+brkpt_hi:   .byte 8           ;breakpoint address high
+brkpt_op:   .byte 8           ;breakpoint original opcode
+brkpt_bs:   .byte 8           ;breakpoint bank select
 ;I/O emulation
 ;global
 irq_mask:   .byte 1           ;interrupt mask, bit set if enabled, default 0b00000001
@@ -273,6 +319,12 @@ lcd_flags:  .byte 1           ;0xff=usable, 0=busy timeout
 spi_cmd:    .byte 1           ;save for slave select hold
 spi_rdat:   .byte 1           ;data in SPI shifter after last write
 
+;MMU
+mmu_emu:    .byte 4           ;emulator MMU bank select segments
+mmu_mon:    .byte 4           ;monitor MMU bank select segments
+mmu_sync:   .byte 1           ;monitor MMU synced to emulator MMU
+                              ;0=separate monitor settings, 0xff=synced
+
 ;DMA
 dma_last_cmd:
             .byte 1           ;command in progress | last successful command + 0x10
@@ -280,12 +332,26 @@ dma_last_cmd:
 dma_tab_index:
             .byte 1           ;index to block transfer table, 0xff if trashed
 ;dma block transfer table:
+;
 ;        SPI            I2C            EEPROM
 ;  byte  slave address  -don't care-   program number
+;  byte  bank select    bank select    bank select (0xFF=current banks)
 ;  word  start address  start address  start address
 ;  word  byte count     byte count     end address
 ;  word  temp count     temp count     -don't care-  
-dma_tab:    .byte 7
+;
+;        XMEM copy setup (cmd=9)    after XMEM copy command (stat=1A)
+;  byte  -don't care-               target bank select
+;  byte  source bank select         source bank select
+;  byte  source page address        source page address
+;  byte  target bank select         target page address
+;  byte  target page address        byte count always 0
+;  byte  page count                 page count
+;  byte  temp byte count            temp byte count
+;  byte  temp page count            temp page count
+;
+;  temp counts = remaining counts for interrupted transfers!
+dma_tab:    .byte 8
 
 ;RS232 Buffers
 usart_ena:  .byte 1           ;usart interrupt enable bits
@@ -294,6 +360,9 @@ tx_fill:    .byte 1           ;fill level in tx fifo (0 = empty)
 rx_inx:     .byte 1           ;input index to rx fifo
 rx_fill:    .byte 1           ;fill level in rx fifo (0 = empty)
 flow_cmd:   .byte 1           ;XON/XOFF - bit 7: 1=done, 0=pending
+.if (pc > 0xff)
+   .error "lower RAM locations exceed 0x00ff (high address byte != 0)!"
+.endif
             align 8           ;buffers on page boundary
 tx_buf:     .byte 256         ;transmit fifo
 rx_buf:     .byte 256         ;receive fifo
@@ -308,6 +377,7 @@ rx_buf:     .byte 256         ;receive fifo
 ; Address Bus
 .EQU  abuslo      = portb
 .EQU  aloddr      = ddrb
+.EQU  aloin       = pinb
 .EQU  abushi      = porta
 .EQU  ahiddr      = ddra
 ; Data Bus
@@ -332,6 +402,9 @@ rx_buf:     .byte 256         ;receive fifo
 .EQU  usart_txi_dis  = 0b10011000   ;RXCIE, RXEN, TXEN
 .EQU  usart_txi_ena  = 0b10111000   ;RXCIE, UDRIE, RXEN, TXEN
 
+;
+; definition of global macros
+;
 .macro      addi
             subi  @0,-@1            ;subtract the negative of an immediate value
 .endmacro
@@ -340,6 +413,126 @@ rx_buf:     .byte 256         ;receive fifo
             sbci  @0h,high(-@1)
 .endmacro 
 
+.ifdef mmu_vld
+   ;
+   ; rapid load of mmu registers
+   ;
+   ; addressing implemented as johnson counter to avoid change of 2 bits
+   ; in opposite direction causing unwanted register writes
+
+   ; load active bank select to emulator or monitor bank select
+   .macro   load_mmu          ;@0 = register set: mmu_emu or mmu_mon
+      out   cbus,clear        ;turn off -OE to RAM
+      lds   a,@0
+      out   dbusout,a
+      ldi   a,bank_sel_iox^(1<<bank_sel)
+      out   abushi,a
+      out   abuslo,zero       ;set address 0
+      out   dbusddr,allon     ;data write mode
+      sbi   cbus,bank_sel_direct
+      out   abuslo,one        ;set next address 1
+      lds   a,@0+1
+      out   dbusout,a
+      out   abuslo,allon      ;set next address 3
+      lds   a,@0+3
+      out   dbusout,a
+      ldi   a,2               ;set next address 2
+      out   abuslo,a   
+      lds   a,@0+2
+      out   dbusout,a
+      sbi   abushi,bank_sel   ;end enable bank select
+;      out   dbusddr,zero
+;      out   cbus,readmem
+   .endmacro
+   ; load active bank select to single dma bank select
+   .macro   load_mmu1
+      lds   a,dma_tab+1
+      cpi   a,0xff            ;valid bank switch?
+      breq  load_mmu1_bs
+         out   cbus,clear        ;turn off -OE to RAM
+         lds   a,dma_tab+1       ;bank select in dma tab
+         out   dbusout,a
+         ldi   a,bank_sel_iox^(1<<bank_sel)
+         out   abushi,a
+         out   abuslo,zero       ;set address 0
+         out   dbusddr,allon     ;data write mode
+         sbi   cbus,bank_sel_direct
+         out   abuslo,one        ;set next address 1
+         out   abuslo,allon      ;set next address 3
+         ldi   a,2               ;set next address 2
+         out   abuslo,a   
+         sbi   abushi,bank_sel   ;end enable bank select
+         out   dbusddr,zero
+         out   cbus,readmem
+      load_mmu1_bs:
+   .endmacro
+   ; load active bank select to xmem copy dma bank select
+   .macro   load_mmu2
+      out   cbus,clear        ;turn off -OE to RAM
+      lds   a,dma_tab+1       ;source bank select in dma tab
+      out   dbusout,a
+      ldi   a,bank_sel_iox^(1<<bank_sel)
+      out   abushi,a
+      out   abuslo,zero       ;set address 0
+      out   dbusddr,allon     ;data write mode
+      sbi   cbus,bank_sel_direct
+      out   abuslo,one        ;set next address 1
+      out   abuslo,allon      ;set next address 3
+      lds   a,dma_tab         ;target bank select in dma tab
+      out   dbusout,a
+      ldi   a,2               ;set next address 2
+      out   abuslo,a   
+      sbi   abushi,bank_sel   ;end enable bank select
+      out   dbusddr,zero
+      out   cbus,readmem
+   .endmacro
+   ; restore emulator bank select after dma ends
+   .macro   load_mmu_end
+      lds   a,dma_tab+1
+      cpi   a,0xff            ;valid bank switch?
+      breq  load_mmu1_end_rest
+         load_mmu mmu_emu
+         out   dbusddr,zero
+      load_mmu1_end_rest:
+   .endmacro
+.else
+   ; no MMU - do nothing
+   .macro   load_mmu1
+   .endmacro
+   .macro   load_mmu_end
+   .endmacro
+.endif
+; save DMA registers and restore MMU during interrupt if needed
+.macro   rupt_dma_mmu      ;@0 = 1: restore z as op decode
+   .ifdef dma_vld
+      sbrs  flags,dma_rpt     ;interupt during dma transfer?
+      rjmp  rupt_save_dma
+         cbr   flags,(1<<dma_rpt)
+         sts   dma_tab+2,zl      ;save current dma memory address
+         sts   dma_tab+3,zh
+         sts   dma_tab+6,xl      ;save dma count in progress
+         sts   dma_tab+7,xh
+         cbr   flags,(1<<modify) ;unlock extended memory address after modify
+         .ifdef mmu_vld
+            lds   a,dma_tab+1
+            cpi   a,0xff
+            breq  rupt_restore_mmu
+               load_mmu mmu_emu
+            rupt_restore_mmu:
+         .endif
+         out   dbusddr,zero
+         out   cbus,readmem
+         .if @0 == 1
+            ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
+            sbrc  stat2,3           ;test decimal flag
+               ldi   oc_tabh,high(oc_tabd)
+         .endif
+         sbiw  pch:pcl,2         ;prepare for instruction retry
+         sbrs  flags,op_ind      ;3 byte instruction if direct
+      rupt_save_dma:
+   .endif
+   sbiw  pch:pcl,1            ;adjust pc to be saved on stack
+.endmacro
 ;
 ; wait_ns  waittime in ns , cyles already used 
 ;
@@ -485,7 +678,6 @@ rx_int:
    cpi   i,0               ;break should have all bits 0
    ifeq     rx_break
       sbr   flags,(1<<deb_on) ;turn debugging on
-      cbr   flags,(1<<emu_run) ;stop emulation
       lds   i,irq_flag        ;clear ACIA TDRE & RDRF
       cbr   i,0b11000000
       sts   irq_flag,i
@@ -499,9 +691,15 @@ rx_int:
       do    rx_brk_wait
          sbis  pind,0            ;exit after RX pin returns to idle
       loop  rx_brk_wait
+      push  zl
+      push  zh
       push  a
+      PrintStr_far rx_break_msg ;10,13,"Terminal break signal detected"
+      call stop_emu
       call crlf
       pop   a
+      pop   zh
+      pop   zl
       ldi   i,27              ;force escape
    end      rx_break
    lds   k,rx_fill         ;check buffer full
@@ -522,7 +720,7 @@ rx_int:
          ifne  rx_send_xoff
             ldi   i,0x13         ;post xoff pending
             sts   flow_cmd,i
-             ldi   i,usart_txi_ena  ;notify transmitter
+            ldi   i,usart_txi_ena ;notify transmitter
             out   ucsrb,i
             .ifdef irq_dis_real
                sts   usart_ena,i
@@ -539,7 +737,7 @@ rx_int:
             sbi   cbusddr,3      ;set IRQ
          end   rx_int_ena
          lds   i,irq_flag
-         sbr   i,0b01000000   ;set RDRF 
+         sbr   i,0b01000000      ;set RDRF 
          sts   irq_flag,i        ;store status
       end   rx_acia_on       
    .endif
@@ -605,33 +803,6 @@ tx_udre:
    pop   xl
    out   sreg,s
    reti
-
-; Messages part 1 (optimizing empty space before opcode table for CMOS)
-; some words available if rx/tx maximum size and DMA (16 more for NMOS)
-;                              word count, X = don't use in part 1 ---> ;##
-;.ifdef cmos_core
-;stp_instr:     .db   "STP - Emulator halted",0                          ; X
-;.else
-;inv_instr:     .db   "Illegal Opcode ",0                                ; X
-;.endif
-;emu_msg:       .db   13,10,13,10,core_string," Emulator V",version,0    ; X
-;built_msg:     .db   " built ",__DATE__," ",__TIME__,0                  ;14
-load_wait:     .db   13,10,"Loading, <ESC> to abort",13,10,0            ;14
-load_abort:    .db   " Load aborted",0                                  ; 7
-;err_chksum:    .db   " Checksum failed",0,0                             ; 9
-rs_vect_empty: .db   13,10,"Check reset vector",0,0                     ;11
-reset_msg:     .db   "  Reset",0                                        ; 4
-bpt_clrd_msg:  .db   10,13,"All breakpoints cleared",0                  ;13
-bpt_info:      .db   10,13,"Breakpoints  (slot#:address)",13,10,0,0     ;17
-;bpt_info_none: .db   10,13,"No breakpoints active",0                    ;12
-bpt_slot_full: .db   10,13,"No more breakpoint slots available",0,0     ;19
-.ifndef irq_dis_real       ;+53 words available (6 less for NMOS)
-load_ok:       .db   13,"Load OK",0,0                                   ; 5
-err_nonhex:    .db   " Non-Hex data in record",0                        ;12
-err_func:      .db   " Invalid function or count in record",0,0         ;19
-illegal_int:   .db   13,10,"AVR Illegal Interrupt",0                    ;12
-back_line:     .db   13,27,91,"K",27,91,"1A",0,0                        ; 5
-.endif
 
 ;**************************************************
 ;
@@ -706,23 +877,7 @@ t0_cmi:
    ifs_and  debug_start
    sbrs  flags,deb_on      ;debug mode
    ifs      debug_start
-      .if defined(spi_sel) || defined(i2c_sel)
-         sbrs  flags,dma_rpt     ;interupt during dma transfer?
-         ifs   t0_dma
-            cbr   flags,(1<<dma_rpt)
-            sts   dma_tab+1,zl      ;save current dma memory address
-            sts   dma_tab+2,zh
-            sts   dma_tab+5,xl      ;save dma count in progress
-            sts   dma_tab+6,xh
-            cbr   flags,(1<<modify) ;unlock extended memory address after modify
-            out   dbusddr,zero      ;switch back to read mode
-            out   cbus,readmem      ;OE to RAM
-            ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
-            sbiw  pch:pcl,2         ;prepare for instruction retry
-            sbrs  flags,op_ind      ;3 byte instruction if direct
-         end   t0_dma
-      .endif
-      sbiw  pch:pcl,1      ;adjust PC to next opcode
+      rupt_dma_mmu 1       ;handle DMA save & MMU restore
       sbr   flags,(1<<deb_act)  ;prevent double_activation
       ldi   a,NMI_dis      ;no emulator interrupts during monitor
       out   ibus,a
@@ -742,6 +897,7 @@ t0_ovi:
    sbiw  pch:pcl,1         ;adjust PC to next opcode
    pop   a                 ;discard return address from stack
    pop   a
+   cbr   flags,(1<<emu_run)   
    sei
    rjmp  end_command
 
@@ -853,7 +1009,7 @@ rs_IO_ext:
       out   spi_out,a         ;precharge slave sel (abuslo)
       set_io_select spi_sel   ;precharge io select register
       ena_io_select
-      ldi   a,~(1<<spi_miso)  ;set all output exept miso
+      ldi   a,~(1<<spi_miso)  ;set all output except miso
       out   spi_ddr,a         ;activate spi output
       rs_set_ddr
       nop2                    ;wait 2 cycles 
@@ -949,20 +1105,52 @@ reset:
    in    a,mcucsr             ;borf or porf
    andi  a,0b101
    ifne  clear_mem
-      clr   zl                ;clear memory
-      clr   zh
-      out   cbus,clear        ;prepare to write memory
-      out   dbusddr,allon
-      do     memory_clear
-         out   abuslo,zl         ;next address
-         out   abushi,zh
-         out   cbus,writemem     ;WE, ~OE
-         out   dbusout,zero      ;write data
-         out   cbus,clear        ;~WE / write cycle ends 120ns/16MHz
-         adiw  z,1
-      loopne memory_clear
-      out   dbusddr,zero      ;prepare to read
-      out   cbus,readmem      ;OE / read mode back on
+reset_clear:
+      .ifdef mmu_vld
+         ldi   a,15           ;clear last RAM bank first
+         mov   operand,a
+         do       bank_clear
+            set_io_reset mmu_sel
+            out   abuslo,zero    ;set segment 0 lower bank
+            par_wrt 60
+            out   abuslo,one     ;set segment 1 higher bank
+            par_wrt 60
+            clr   zl                ;clear memory
+            clr   zh
+            out   cbus,clear        ;prepare to write memory
+            out   dbusddr,allon
+            do       memory_clear
+               out   abushi,zh         ;next address
+               out   abuslo,zl
+               out   cbus,writemem     ;WE, ~OE
+               out   dbusout,zero      ;write data
+               out   cbus,clear        ;~WE / write cycle ends 120ns/16MHz
+               adiw  z,1
+            looppl   memory_clear
+            out   dbusddr,zero      ;prepare to read
+            out   cbus,readmem      ;OE / read mode back on
+            dec   operand
+         looppl   bank_clear
+         sts   mmu_emu,zero      ;set default banks
+         sts   mmu_emu+1,zero
+         sts   mmu_emu+2,one
+         sts   mmu_emu+3,one
+      .else
+         clr   zl                ;clear memory
+         clr   zh
+         out   cbus,clear        ;prepare to write memory
+         out   dbusddr,allon
+         do     memory_clear
+            out   abushi,zh         ;next address
+            out   abuslo,zl
+            out   cbus,writemem     ;WE, ~OE
+            out   dbusout,zero      ;write data
+            out   cbus,clear        ;~WE / write cycle ends 120ns/16MHz
+            adiw  z,1
+         loopne memory_clear
+         out   dbusddr,zero      ;prepare to read
+         out   cbus,readmem      ;OE / read mode back on
+      .endif
       ldi   yl,low(brkpt_lo)  ;clear breakpoints
       ldi   yh,high(brkpt_lo)
       do       brkpt_reset
@@ -975,10 +1163,10 @@ reset:
       PrintStr reset_msg      ;"  Reset"
    end   clear_mem
 
-   rcall soft_reset
-
    PrintStr emu_msg        ;13,10,"6502 emulator  Vx.xxx"
    PrintStr built_msg      ;" built ",__DATE__
+
+   rcall soft_reset
 
 ; load & run on power on
 ; if a program is selected for autoload
@@ -994,7 +1182,15 @@ reset:
          cpi   a,0xff         ;test autoload program set
          ifne  reset_autoload
             sts   prog_num,a
-            rcall eep_load_prog
+            .ifdef mmu_vld
+               rcall mmu_set_mon    ;set banks for monitor                  
+               rcall eep_load_prog
+               push  a
+               rcall mmu_set_emu_nosync ;reset banks for emulator
+               pop   a                  
+            .else
+               rcall eep_load_prog
+            .endif
             tst   a           ;load O.K.
             ifeq  eep_load_ok
                rcall load_reset_vector
@@ -1069,7 +1265,7 @@ reset:
    rcall show_regs
    rcall show_prompt
 
-debugger:      ;entry from t0 cmp match
+debugger:      ;entry from t0 cmp match / loop with invalid command
    do    debug_main
       do    deb_wait4input
 ; disabled update of esc & showprompt timer
@@ -1358,6 +1554,7 @@ debugger:      ;entry from t0 cmp match
             cpi   a,'B'
             ifeq_far br_util
                ld    a,y+              
+;breakpoint information
                cpi   a,'I'
                ifeq  br_info
                   ld    a,y+           ;check validity (no parms)
@@ -1366,17 +1563,26 @@ debugger:      ;entry from t0 cmp match
                   rcall brkpt_info
                   rjmp  end_command
                end   br_info
+;breakpoint set
                cpi   a,'S'
                ifeq  br_set
                   rcall get_adr
                   ldi   yl,low(brkpt_lo)  ;address already set?
                   ldi   yh,high(brkpt_lo)
+                  .ifdef mmu_vld
+                     rcall mmu_generate
+                  .endif
                   do       br_set_already
                      ld    a,y+
                      cp    a,zl
                      ifeq_and br_already_set
-                     ldd   a,y+9
+                     ldd   a,y+7
                      cp    a,zh
+                  .ifdef mmu_vld
+                     ifeq_and br_already_set
+                     ldd   a,y+23            ;brkpt_bs match?
+                     cp    a,e
+                  .endif
                      ifeq     br_already_set
                         rcall brkpt_info
                         rjmp  end_command
@@ -1388,17 +1594,20 @@ debugger:      ;entry from t0 cmp match
                      ld    a,y+
                      cp    a,allon
                      ifeq_and br_set_slot
-                     ldd   a,y+9
+                     ldd   a,y+7
                      cp    a,allon
                      ifeq     br_set_slot
+                        .ifdef mmu_vld
+                           rcall mmu_set_mon
+                        .endif
                         sbiw  y,1
                         st    y,zl              ;set new breakpoint address
-                        std   y+10,zh
-                        out   abuslo,zl         ;fetch original opcode
-                        out   abushi,zh
+                        std   y+8,zh
+                        out   abushi,zh         ;fetch original opcode
+                        out   abuslo,zl
                         wait_data_valid 0       ;0ns minimum @ 16MHz
                         in    a,dbusin
-                        std   y+20,a            ;set original opcode
+                        std   y+16,a            ;set original opcode
                         ldi   a,0xdb            ;replace with STP opcode
                         out   cbus,writemem     ;WE, ~OE
                         out   dbusout,a         ;precharge write
@@ -1406,6 +1615,11 @@ debugger:      ;entry from t0 cmp match
                         out   cbus,clear        ;~WE / write cycle ends 180ns/16MHz
                         out   dbusddr,zero      ;dbus = input
                         out   cbus,readmem      ;OE / read mode back on
+                        .ifdef mmu_vld
+                        ;  rcall mmu_generate      ;set bank
+                           std y+24,e
+                           rcall mmu_set_emu_nosync
+                        .endif
                         rcall brkpt_info
                         rjmp  end_command
                      end      br_set_slot
@@ -1415,6 +1629,7 @@ debugger:      ;entry from t0 cmp match
                   rcall brkpt_info
                   rjmp  end_command
                end   br_set
+;breakpoint clear
                cpi   a,'C'
                ifeq  br_clr         ;get slot# or all
                   do     br_clr_parse
@@ -1436,8 +1651,8 @@ debugger:      ;entry from t0 cmp match
                      end   br_clr_none_msg
                      rjmp  end_command
                   end   br_clr_all
-                  subi  a,'0'           ;0-9?
-                  cpi   a,10
+                  subi  a,'0'           ;0-7?
+                  cpi   a,8
                   iflo  br_clr_slot
                      ldi   yl,low(brkpt_lo)  ;select breakpoint
                      add   yl,a
@@ -1450,7 +1665,61 @@ debugger:      ;entry from t0 cmp match
                end   br_clr
 br_inv_cmd:    rjmp  invalid_command
             end      br_util
-
+            .ifdef mmu_vld
+;
+; S = select bank (MMU)
+;     SI<cr>      = information - list emulator and monitor bank select
+;     SEbbbb<cr>  = select emulator bank - affects 6502 view of RAM 
+;     SMbbbb<cr>  = select monitor bank - affects commands M, D, W, L & EL      
+;     SS<cr>      = select synchronous monitor bank (same as emulator)
+;       bbbb      = address segment 0-3 by nibble position, value = bank 0-F
+;
+               cpi   a,'S'
+               ifeq_far sb_util
+                  ld    a,y+              
+;bank select information
+                  cpi   a,'I'
+                  ifeq  sb_info
+                     ld    a,y+           ;check validity (no parms)
+                     cpse  a,zero
+                     rjmp  invalid_command
+                     rcall bs_info
+                     rjmp  end_command
+                  end   sb_info
+;select monitor banks synced
+                  cpi   a,'S'
+                  ifeq  sb_sync
+                     ld    a,y+           ;check validity (no parms)
+                     cpse  a,zero
+                     rjmp  invalid_command
+                     sts   mmu_sync,allon ;set sync flag
+                     rcall bs_info
+                     rjmp  end_command
+                  end   sb_sync
+;select emulator banks
+                  cpi   a,'E'
+                  ifeq  sb_emu
+                     ldi   zl,low(mmu_emu)
+                     ldi   zh,high(mmu_emu)
+                     rcall get_banks
+                     rcall mmu_set_emu
+                     rcall stop_emu       ;force emulator halt
+                     rcall bs_info  
+                     jmp   end_command
+                  end   sb_emu
+;select monitor banks
+                  cpi   a,'M'
+                  ifeq  sb_mon
+                     ldi   zl,low(mmu_mon)
+                     ldi   zh,high(mmu_mon)
+                     rcall get_banks
+                     sts   mmu_sync,zero  ;clear sync flag
+                     rcall bs_info
+                     jmp   end_command
+                  end   sb_mon
+                  rjmp  invalid_command
+               end      sb_util
+            .endif
 
 ;
 ; D = disassemble memory   Syntax: D(aaaa|+)<CR>
@@ -1472,12 +1741,18 @@ br_inv_cmd:    rjmp  invalid_command
                   rcall get_adr           ;get Address
                   movw  y,z
                end   dis_next
+               .ifdef mmu_vld
+                  rcall mmu_set_mon
+               .endif
                ldi   a,10              ;count
                sbrc  flags,emu_run
                   ldi   a,6               ;reduce count if running
                do     dis_loop
                   push  a
                   rcall crlf
+                  .ifdef mmu_vld
+                     rcall mmu_show
+                  .endif
                   mov   a,yh              ;show address
                   rcall PrintHex
                   mov   a,yl
@@ -1489,6 +1764,9 @@ br_inv_cmd:    rjmp  invalid_command
                loopne dis_loop            
                sts   lmem_disas,yl     ;load previous address
                sts   lmem_disas+1,yh
+               .ifdef mmu_vld
+                  rcall mmu_set_emu_nosync
+               .endif
                rjmp  end_command
             end   show_disasm
             .ifdef   eep_vld
@@ -1591,8 +1869,15 @@ eep_prsv:            ; Output to RS232 & EEP
                      cpi   a,0xff
                      breq  eep_inv_cmd
                      sts   prog_num,a
+                     rcall stop_emu       ;force emulator halt
                      rcall brkpt_clr_all  ;clear all breakpoints
-                     rcall eep_load_prog
+                     .ifdef mmu_vld
+                        rcall mmu_set_mon    ;set banks for monitor                  
+                        rcall eep_load_prog
+                        rcall mmu_set_emu_nosync ;reset banks for emulator                  
+                     .else
+                        rcall eep_load_prog
+                     .endif
                      rjmp  end_command
 eep_inv_cmd:         rjmp  invalid_command
                   end   eep_load
@@ -1741,16 +2026,23 @@ skip_get_adr:
                mov   d,a
                sts   lmem_display,zl
                sts   lmem_display+1,zh
+               movw  y,z
+               .ifdef mmu_vld
+                  rcall mmu_set_mon
+               .endif
                do    show_mem_line
                   rcall crlf
-                  mov   a,zh           ;show address
+                  .ifdef mmu_vld
+                     rcall mmu_show
+                  .endif
+                  mov   a,yh           ;show address
                   rcall PrintHex
-                  mov   a,zl
+                  mov   a,yl
                   rcall PrintHex
                   rcall colon            
                   do     show_mem_data      
-                     out   abuslo,zl      ;memory fetch
-                     out   abushi,zh
+                     out   abushi,yh      ;memory fetch
+                     out   abuslo,yl
                      clt                  ;clear reverse video
                      wait_data_valid 1    ;60ns minimum @ 16MHz
                      in    a,dbusin
@@ -1759,18 +2051,21 @@ skip_get_adr:
                         rcall brkpt_chk
                      end   show_mem_brk
                      rcall RevHex
-                     adiw  z,1
-                     ldi   a,3            ;seperate words with spaces
-                     and   a,zl
+                     adiw  y,1
+                     ldi   a,3            ;separate words with spaces
+                     and   a,yl
                   loopne show_mem_data
                      rcall space
                      ldi   a,31           ;new line after 32 bytes              
-                     and   a,zl
+                     and   a,yl
                   loopne show_mem_data
-                  cp    zl,d           ;0x100 bytes displayed?
+                  cp    yl,d           ;0x100/0x40 bytes displayed?
                loopne show_mem_line
+               .ifdef mmu_vld
+                  rcall mmu_set_emu_nosync
+               .endif
                rjmp  end_command
-            end   show_mem
+            end      show_mem
 ;
 ; W = Write memory   Syntax: W(aaaa|+) bb..bb<CR>
 ;     aaaa = address, leading zeros can be omitted
@@ -1800,6 +2095,9 @@ skip_get_adr:
                   rcall get_wbyte         ;get data
                loop  write_mem_dryrun
                mov   yl,d
+               .ifdef mmu_vld
+                  rcall mmu_set_mon       ;set banks for monitor                  
+               .endif
                out   cbus,clear        ;readmode off
                out   dbusddr,allon     ;dbus = output
                do    write_mem_realrun  ;real write
@@ -1810,8 +2108,8 @@ skip_get_adr:
                loopeq write_mem_realrun
                   rcall get_wbyte         ;get data
                   rcall brkpt_chk_write   ;check write to breakpoint
-                  out   abuslo,zl 
                   out   abushi,zh
+                  out   abuslo,zl 
                   out   cbus,writemem     ;WE, ~OE
                   out   dbusout,a         ;dbus write
                   adiw  z,1
@@ -1821,6 +2119,9 @@ skip_get_adr:
                out   cbus,readmem      ;OE / read mode back on
                sts   lmem_write,zl
                sts   lmem_write+1,zh
+               .ifdef mmu_vld
+                  rcall mmu_set_emu_nosync ;reset banks for emulator                  
+               .endif
                rjmp  end_command
             end   write_mem
 ;
@@ -1832,8 +2133,11 @@ skip_get_adr:
                ld    a,y+           ;check validity (no parms)
                cpse  a,zero
                rjmp  invalid_command
-               cbr   flags,(1<<emu_run) ;force emulator halted  
+               rcall stop_emu       ;force emulator halt  
                rcall brkpt_clr_all  ;clear all breakpoints
+               .ifdef mmu_vld
+                  rcall mmu_set_mon    ;set banks for monitor                  
+               .endif
                PrintStr load_wait
                do    load_mem_record
                   do     wait_colon    ;wait for start of record
@@ -1860,8 +2164,8 @@ skip_get_adr:
                      out   dbusddr,allon     ;dbus = output
                      do     load_data
                         rcall read_byte_esc     ;read data
-                        out   abuslo,zl 
                         out   abushi,zh
+                        out   abuslo,zl 
                         out   cbus,writemem     ;WE, ~OE
                         out   dbusout,a         ;dbus write
                         adiw  z,1
@@ -1879,10 +2183,15 @@ skip_get_adr:
                   else     load_mem_data
                      cpi   a,1               ;end of record function
                      ifeq  load_complete
+                     .ifdef mmu_vld
+                        lds   a,mmu_sync        ;loaded to emulator bank?
+                        tst   a
+                        ifne_and load_pc
+                     .endif
                         tst   zh                ;address is valid PC?
-                        ifne  load_pc
+                        ifne     load_pc
                            movw  pcl:pch,z         ;set PC
-                        end   load_pc
+                        end      load_pc
                         PrintStr load_ok        ;13,"Load OK"
                         rjmp  discard_serial_stream   ;OK message - wait for eol
                      else  load_complete
@@ -1891,7 +2200,10 @@ skip_get_adr:
                      end   load_complete
                   end      load_mem_data
                loop  load_mem_record
-               rjmp  end_command
+               ;.ifdef mmu_vld
+               ;   rcall mmu_set_emu_nosync ;reset banks for emulator                  
+               ;.endif
+               ;rjmp  end_command
             end      load_mem
 ;
 ; H = Halt Emulator execution   Syntax: H<CR>
@@ -1917,24 +2229,26 @@ skip_get_adr:
                ldi   a,10        ;linefeed
                rcall PrintChr
                rcall show_regs
-               sbr   flags,(1<<emu_run)   
                rcall show_prompt
                cli                        ;debug instance exiting
                cbr   flags,(1<<deb_act)   ;allow t0 to call again
 emu_start:
-               out   abuslo,pcl        ;opcode fetch - no interrupts
-               out   abushi,pch
+               out   abushi,pch        ;opcode fetch - no interrupts
+               out   abuslo,pcl
                      ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
+                     sbrc  stat2,3           ;test decimal flag
+                        ldi   oc_tabh,high(oc_tabd) 
                      IRQ_restore             ;enable NMI, IRQ if allowed
-               wait_data_valid 5       ;300ns minimum @ 16MHz
+               wait_data_valid 7       ;420ns minimum @ 16MHz
                in    opcode,dbusin
                cpi   opcode,0xdb       ;potential breakpoint?
                ifeq  emu_start_brk
                   rcall brkpt_chk_pc      ;get original opcode
                end   emu_start_brk
+               sbr   flags,(1<<emu_run)   
                adiw  pch:pcl,1         ;pc -> op low
-               out   abuslo,pcl        ;operand address low prefetch
-               out   abushi,pch
+               out   abushi,pch        ;operand address low prefetch
+               out   abuslo,pcl
                wait_data_valid 5       ;300ns minimum @ 16MHz 
                      adiw  pch:pcl,1         ;pc -> op high
                      ijmp                    ;execute opcode
@@ -1949,15 +2263,24 @@ emu_start:
                rjmp  invalid_command
                rcall crlf   
                cli
-               ldi   flags,(1<<emu_run)   ;clear all other flags
+               clr   flags          ;no debug
                rjmp  emu_start
             end   exit_deb
 ;
-; R = Reset emulation registers & set PC to reset vector   Syntax: R<CR>
+; R  = Reset emulation registers & set PC to reset vector   Syntax: R<CR>
+; RC = Reset with memory clear
 ;
             cpi   a,'R'
             ifeq  deb_reset
-               ld    a,y+           ;check validity (no parms)
+               ld    a,y+
+               cpi   a,'C'
+               ifeq  rs_clear
+                  ld    a,y+
+                  cpse  a,zero
+                  rjmp  invalid_command
+                  rcall stop_emu
+                  rjmp  reset_clear
+               end  rs_clear
                cpse  a,zero
                rjmp  invalid_command
                rcall soft_reset
@@ -1995,7 +2318,7 @@ invalid_command:
             sts   cmd_inx,yl
             rcall erase2eol         ;esc[K - clear rest of line
          
-            rjmp  debug_main        ;loop with invalid command
+            rjmp  debugger          ;loop with invalid command
             
 ; Valid command            
             
@@ -2013,6 +2336,8 @@ end_command:                  ;new prompt
    cbr   flags,(1<<deb_act)   ;allow t0 to call again
 end_exit:
    ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
+   sbrc  stat2,3              ;test decimal flag
+      ldi   oc_tabh,high(oc_tabd) 
    IRQ_restore                ;allow NMI, IRQ only if allowed
    op_decode                  ;start processing
  
@@ -2199,8 +2524,8 @@ soft_reset:
 load_reset_vector:
    ldi   oplow,low(0xfffc) ;reset vector
    ldi   ophigh,high(0xfffc)
-   out   abuslo,oplow      ;indirect address low prefetch
-   out   abushi,ophigh
+   out   abushi,ophigh     ;indirect address low prefetch
+   out   abuslo,oplow 
    wait_data_valid 1       ;60ns minimum @ 16MHz 
          adiw  opointer,1  ;pc -> adr high
    in    pcl,dbusin        ;save low pointer to pc     
@@ -2225,17 +2550,30 @@ show_regs:
    sts   cmd_reg_timer,a
    ldi   a,13            ;return
    rcall PrintChr
+   .ifdef mmu_vld
+      lds   a,mmu_emu
+      rcall prtx_dgt
+      ldi   a,'.'
+      rcall PrintChr
+   .endif
    ldi   a,'1'           ;stackpointer
    rcall PrintChr
    mov   a,spointer
    rcall PrintHex
    rcall space
-   sbrs  flags,emu_run
-   ifs   show_reg_run   ;show breakpoint if halted
-      clt
-   else  show_reg_run
-      rcall brkpt_chk_pc
-   end   show_reg_run
+;   sbrs  flags,emu_run
+;   ifs   show_reg_run   ;show breakpoint if halted
+;      clt
+;   else  show_reg_run
+;      rcall brkpt_chk_pc
+;   end   show_reg_run
+   rcall brkpt_chk_pc
+   .ifdef mmu_vld
+      mov   a,e            ;show bank
+      rcall revx_dgt
+      ldi   a,'.'
+      rcall RevChr
+   .endif
    mov   a,pch           ;program counter
    rcall RevHex
    mov   a,pcl
@@ -2300,17 +2638,15 @@ show_prompt:
 ;*****************************************************************
 
 disasm:
-   out   abuslo,yl         ;memory fetch
-   out   abushi,yh
+   out   abushi,yh         ;memory fetch
+   out   abuslo,yl
    clr   d                 ;load index to opcode table
    clt                     ;clear reverse video
-   movw  z,y
    wait_data_valid 3       ;180ns minimum @ 16MHz
    in    a,dbusin
    cpi   a,0xdb            ;is potential breakpoint?
    ifeq  show_dis_brk
       rcall brkpt_chk
-      movw  y,z
    end   show_dis_brk
    mov   c,a               ;opcode
    adiw  y,1               ;next byte
@@ -2355,8 +2691,8 @@ disasm:
    andi  b,0b0011000       ;mask op addressing
    cpi   b,0b0001000             
    ifeq  dis_data_one      ;zero page or immediate
-      out   abuslo,yl         ;memory fetch
-      out   abushi,yh
+      out   abushi,yh         ;memory fetch
+      out   abuslo,yl
       adiw  y,1
       wait_data_valid 1       ;60ns minimum @ 16MHz
       in    a,dbusin
@@ -2364,13 +2700,13 @@ disasm:
    end   dis_data_one
    cpi   b,0b0010000             
    ifeq  dis_data_abs      ;2 Byte absolute (reverse order)
-      out   abuslo,yl         ;memory fetch
-      out   abushi,yh
+      out   abushi,yh         ;memory fetch
+      out   abuslo,yl
       adiw  y,1
       wait_data_valid 1       ;60ns minimum @ 16MHz
       in    c,dbusin
-      out   abuslo,yl         ;memory fetch
-      out   abushi,yh
+      out   abushi,yh         ;memory fetch
+      out   abuslo,yl
       adiw  y,1
       wait_data_valid 1       ;60ns minimum @ 16MHz
       in    a,dbusin
@@ -2440,8 +2776,8 @@ disasm:
 
 ;fetch relative address and display as absolute
 dis_rel:
-   out   abuslo,yl         ;memory fetch
-   out   abushi,yh
+   out   abushi,yh         ;memory fetch
+   out   abuslo,yl
    adiw  y,1
    clr   a
    wait_data_valid 2       ;120ns minimum @ 16MHz
@@ -2456,6 +2792,17 @@ dis_rel:
    mov   a,c
    rjmp  PrintHex
 
+;stop emulator with message if running
+;     uses: a, z
+;     out:  flags
+stop_emu:
+   sbrs  flags,emu_run        ;if emulator is running
+   ifs   stop_emu_msg
+      PrintStr emu_stopped    ;10,13,"Emulator stopped"
+      cbr   flags,(1<<emu_run) ;force emulator halt
+   end   stop_emu_msg
+   ret
+   
 ;*****************************************************************
 ;
 ; get hex parameters
@@ -2581,7 +2928,157 @@ get_wadr:
       loopne wadr_shift_nibble
       or    zl,a
    loop      wadr_nibble
-   ret               
+   ret              
+
+.ifdef mmu_vld
+;*****************************************************************
+;
+; bank select utilities
+;
+;*****************************************************************
+;
+; get selected banks from commandline, single parameter
+;     expects y pointing to 1 or 4 hex digits, end of line
+;     expects z pointing to MMU registers
+;     uses a b c
+;
+get_banks:
+   do       get_banks_parse
+      ld    a,y+
+      tst   a              ;premature end of input
+      breq  inv_cmd
+      cpi   a,32           ;skip blanks
+   loopeq   get_banks_parse
+   ldi   b,4
+   ld    c,y            ;test single bank
+   tst   c
+   ifne  get_banks_all
+      do       get_banks_dry
+         rcall get_hex        ;is valid hex?
+         ld    a,y+
+         dec   b
+      loopne   get_banks_dry
+      tst   a              ;end of input required
+      brne  inv_cmd
+      sbiw  yl,5           ;back to segment 0
+      ldi   b,4
+      do       get_banks_hot
+         ld    a,y+
+         rcall get_hex
+         st    z+,a
+         dec   b
+      loopne   get_banks_hot
+      ret
+   end   get_banks_all
+   rcall get_hex           ;set all banks the same
+   do       get_banks_same
+      st    z+,a
+      dec   b
+   loopne   get_banks_same
+   ret
+;
+; bank select info - list emulator & monitor attached RAM banks
+;     uses a y
+;
+bs_info:
+   ldi   yl,low(mmu_emu)    ;copy of bank selects
+   ldi   yh,high(mmu_emu)
+   PrintStr bank_info_emu  ;10,13,"Emulator banks: "
+   do       bs_info_emu
+      ld    a,y+
+      rcall prtx_dgt       ;print hex nibble
+      cpi   yl,low(mmu_mon)
+   loopne   bs_info_emu
+   PrintStr bank_info_mon  ;" - Monitor banks: "
+   lds   a,mmu_sync
+   tst   a
+   ifne  bs_info_sync
+      PrintStr bank_info_syn  ;"sync"
+   else  bs_info_sync
+      do       bs_info_mon
+         ld    a,y+
+         rcall prtx_dgt       ;print hex nibble
+         cpi   yl,low(mmu_sync)
+      loopne   bs_info_mon
+   end   bs_info_sync
+   ret
+;
+; hardware switch between emulator and monitor bank select
+;     uses a
+;
+mmu_set_emu_nosync:  ;set emulator only if required
+   lds   a,mmu_sync  ;skip if bank select is sync
+   tst   a
+   brne  mmu_set_return
+
+mmu_set_emu:         ;set emulator anyway
+   load_mmu mmu_emu
+   out   dbusddr,zero
+   out   cbus,readmem
+mmu_set_return:
+   ret
+
+mmu_set_mon:         ;set monitor only if not sync
+   lds   a,mmu_sync
+   tst   a
+   brne  mmu_set_return
+   load_mmu mmu_mon
+   out   dbusddr,zero
+   out   cbus,readmem
+   ret
+;
+; show bank select for current address
+;     expects y = current address
+;     uses a, z
+;
+mmu_show:            ;show bank select
+   mov   a,yh        ;generate bank select for address
+   ldi   zh,high(mmu_emu)
+   clr   zl
+   rol   a
+   rol   zl
+   rol   a
+   rol   zl
+   lds   a,mmu_sync     ;emu or mon?
+   tst   a
+   ifne  mmu_emu_show
+      addi  zl,low(mmu_emu)
+      ld    a,z            ;show emulator bank select
+      rcall prtx_dgt       ;print hex nibble
+      ldi   a,'.'
+      rjmp  PrintChr
+   end   mmu_emu_show
+   addi  zl,low(mmu_mon)
+   ld    a,z            ;show monitor bank select
+   rcall prtx_dgt       ;print hex nibble
+   ldi   a,'/'
+   rjmp  PrintChr
+;
+; generate bank select for breakpoint
+;     expects z = breakpoint address
+;     output e = selected bank
+;
+mmu_generate:
+   push  zh
+   push  zl
+   mov   e,zh
+   ldi   zh,high(mmu_emu)
+   clr   zl
+   rol   e
+   rol   zl
+   rol   e
+   rol   zl
+   addi  zl,low(mmu_emu)
+   lds   e,mmu_sync     ;emu or mon?
+   tst   e
+   ifeq  mmu_emu_gen
+      addi  zl,low(mmu_mon-mmu_emu)
+   end   mmu_emu_gen
+   ld    e,z            ;get monitor bank select
+   pop   zl
+   pop   zh
+   ret
+.endif
 
 ;*****************************************************************
 ;
@@ -2597,7 +3094,7 @@ brkpt_info:
    ldi   yh,high(brkpt_lo)
    clr   c
    do       br_find_actv
-      ldd   zh,y+10           ;brkpt_hi set?
+      ldd   zh,y+8            ;brkpt_hi set?
       cpse  zh,allon
       inc   c
       ld    zl,y+             ;brkpt_lo set?
@@ -2613,7 +3110,7 @@ brkpt_info:
       ldi   yl,low(brkpt_lo)  ;find breakpoints
       do       br_info_all
          ld    zl,y              ;brkpt_lo set?
-         ldd   zh,y+10           ;brkpt_hi set?
+         ldd   zh,y+8            ;brkpt_hi set?
          cp    zl,allon
          ifne_or  br_info_slot
          cp    zh,allon
@@ -2623,6 +3120,12 @@ brkpt_info:
             subi  a,low(brkpt_lo) - '0'
             rcall PrintChr
             rcall colon
+            .ifdef mmu_vld
+               ldd   a,y+24         ;bank#
+               rcall prtx_dgt
+               ldi   a,'.'
+               rcall PrintChr
+            .endif
             mov   a,zh              ;address
             rcall PrintHex
             mov   a,zl
@@ -2654,58 +3157,93 @@ brkpt_clr_all:
    ret
 ;
 ; clear 1 breakpoint slot
-;     uses a y z
+;     uses a y z operand
 ;     returns c+1 if slot was active / got cleared
 ;
 brkpt_clr_one:
    ld    zl,y              ;brkpt_lo set?
-   ldd   zh,y+10           ;brkpt_hi set?
+   ldd   zh,y+8            ;brkpt_hi set?
    cp    zl,allon
    ifne_or  br_clr_one_slot
    cp    zh,allon
    ifne     br_clr_one_slot
       ;write original opcode back to its RAM location
-      ldd   a,y+20            ;brkpt_op
-      out   abuslo,zl 
+      .ifdef mmu_vld
+         rcall mmu_set_emu
+         ldd   operand,y+24      ;set banks to original
+         ldi   a,3               ;all segments
+         set_io_select mmu_sel
+         do       brkpt_clr_set_banks
+            out   abuslo,a
+            par_wrt 60
+            dec   a
+         looppl   brkpt_clr_set_banks
+         out   dbusddr,zero
+         out   cbus,readmem
+      .endif
       out   abushi,zh
-      out   cbus,writemem     ;WE, ~OE
-      out   dbusout,a         ;dbus write
-      out   dbusddr,allon     ;dbus = output
-      out   cbus,clear        ;~WE / write cycle ends 180ns/16MHz
-      out   dbusddr,zero      ;dbus = input
-      out   cbus,readmem      ;OE / read mode back on
+      out   abuslo,zl
+      wait_data_valid 0
+      in    a,dbusin          ;make sure breakpoint wasnt altered
+      cpi   a,0xdb
+      ifeq  brkpt_restore_mem           
+         ldd   a,y+16            ;brkpt_op
+         out   cbus,writemem     ;WE, ~OE
+         out   dbusout,a         ;dbus write
+         out   dbusddr,allon     ;dbus = output
+         out   cbus,clear        ;~WE / write cycle ends 180ns/16MHz
+         out   dbusddr,zero      ;dbus = input
+         out   cbus,readmem      ;OE / read mode back on
+      end   brkpt_restore_mem           
       st    y,allon           ;reset brkpt_lo
-      std   y+10,allon        ;reset brkpt_hi
+      std   y+8,allon         ;reset brkpt_hi
       inc   c
+      .ifdef mmu_vld
+         rcall mmu_set_emu
+      .endif
    end      br_clr_one_slot
    ret
 ;
-; check STP is breakpoint
-;     expects current address in z
+; check STP or RAM location is breakpoint
+;     expects current address in y
 ;     on match replace a with original opcode
 ;      "   "   set T flag to signal reverse video
-;     uses c y
+;     uses c e z
 ;
 brkpt_chk:
-   ldi   yl,low(brkpt_lo)  ;match breakpoint address
-   ldi   yh,high(brkpt_lo)
+   .ifdef mmu_vld
+      mov   zh,yh
+      rcall mmu_generate
+   .endif
+   ldi   zl,low(brkpt_lo)  ;match breakpoint address
+   ldi   zh,high(brkpt_lo)
    do       br_chk_adr
-      ld    c,y+              ;brkpt_lo match?
-      cp    c,zl
+      ld    c,z+              ;brkpt_lo match?
+      cp    c,yl
       ifeq_and br_slot_match
-      ldd   c,y+9             ;brkpt_hi match?
-      cp    c,zh
+      ldd   c,z+7             ;brkpt_hi match?
+      .ifdef mmu_vld
+         bst   yh,7              ;shadow bank?
+         bld   c,7
+         clt
+         cp    c,yh
+         ifeq_and br_slot_match
+         ldd   c,z+23            ;brkpt_bs match?
+         cp    c,e
+      .else
+         cp    c,yh
+      .endif
       ifeq     br_slot_match
-         cp    zl,allon
+         cp    yl,allon
          ifne_or  br_slot_valid
-         cp    zh,allon
+         cp    yh,allon
          ifne     br_slot_valid
-            ldd   a,y+19            ;show original opcode
+            ldd   a,z+15            ;show original opcode
             set                     ;signal breakpoint = reverse video
          end      br_slot_valid
          ret
       end      br_slot_match
-      cpi   yl,low(brkpt_hi)
+      cpi   zl,low(brkpt_hi)
    loopne   br_chk_adr
    ret
 ;
@@ -2716,23 +3254,52 @@ brkpt_chk:
 ;     uses c
 ;
 brkpt_chk_pc:
-   push  yl
-   push  yh
+   .ifdef mmu_vld
+      push  yl
+      push  yh
+      mov   e,pch          ;bank for PC -> e
+      ldi   yh,high(mmu_emu)
+      clr   yl
+      rol   e
+      rol   yl
+      rol   e
+      rol   yl
+      addi  yl,low(mmu_emu)
+      ld    e,y
+      clt                  ;breakpoint marker off
+      sbrc  flags,emu_run  ;check breakpoint only if stopped
+      rjmp  br_chkp_exit
+   .else
+      clt                  ;breakpoint marker off
+      sbrc  flags,emu_run  ;check breakpoint only if stopped
+      ret
+      push  yl
+      push  yh
+   .endif
    ldi   yl,low(brkpt_lo)  ;match breakpoint address
    ldi   yh,high(brkpt_lo)
-   clt
    do       br_pc_adr
       ld    c,y+              ;brkpt_lo match?
       cp    c,pcl
       ifeq_and br_pc_match
-      ldd   c,y+9             ;brkpt_hi match?
-      cp    c,pch
+      ldd   c,y+7             ;brkpt_hi match?
+      .ifdef mmu_vld
+         bst   pch,7             ;shadow bank?
+         bld   c,7
+         clt
+         cp    c,pch
+         ifeq_and br_pc_match
+         ldd   c,y+23            ;brkpt_bs match?
+         cp    c,e
+      .else
+         cp    c,pch
+      .endif
       ifeq     br_pc_match
          cp    pcl,allon
          ifne_or  br_pc_valid
          cp    pch,allon
          ifne     br_pc_valid
-            ldd   opcode,y+19       ;show original opcode
+            ldd   opcode,y+15       ;original opcode for restart
             set                     ;signal breakpoint = reverse video
          end      br_pc_valid
          rjmp  br_chkp_exit
@@ -2753,20 +3320,33 @@ br_chkp_exit:
 brkpt_chk_write:
    push  yl
    push  yh
+   .ifdef mmu_vld
+      rcall mmu_generate
+   .endif
    ldi   yl,low(brkpt_lo)  ;match breakpoint address
    ldi   yh,high(brkpt_lo)
    do       br_chkw_adr
       ld    c,y+              ;brkpt_lo match?
       cp    c,zl
       ifeq_and br_slotw_match
-      ldd   c,y+9             ;brkpt_hi match?
-      cp    c,zh
+      ldd   c,y+7             ;brkpt_hi match?
+      .ifdef mmu_vld
+         bst   zh,7              ;shadow bank?
+         bld   c,7
+         clt
+         cp    c,zh
+         ifeq_and br_slotw_match
+         ldd   c,y+23            ;brkpt_bs match?
+         cp    c,e
+      .else
+         cp    c,zh
+      .endif
       ifeq     br_slotw_match
          cp    zl,allon
          ifne_or  br_slotw_valid
          cp    zh,allon
          ifne     br_slotw_valid
-            std   y+19,a            ;save original opcode
+            std   y+15,a            ;save original opcode
             ldi   a,0xdb            ;write STP opcode to memory
          end      br_slotw_valid
          rjmp  br_chkw_exit
@@ -2792,7 +3372,6 @@ br_chkw_exit:
 read_serial_esc:
    push  yl
    push  yh
-;   push  c
    do    wait_ser_data
       in    d,sreg      ;preserve sreg interrupt enable
       cli
@@ -2806,7 +3385,6 @@ read_serial_esc:
          dec   i              ;update pointer
          sts   rx_fill,i
          .ifdef flowlo
-;            mov   i,c
             cpi   i,flowlo          ;buffer lower watermark?
             iflo  esc_flow
                lds   i,flow_cmd
@@ -2834,7 +3412,6 @@ read_serial_esc:
          end       esc_read_direct
       end   esc_read_buf
    loop  wait_ser_data
-;   pop   c
    pop   yh
    pop   yl
    cpi   a,27
@@ -2899,7 +3476,6 @@ discard_serial_stream:
          dec   i              ;update pointer
          sts   rx_fill,i
          .ifdef flowlo
-;            mov   i,c
             cpi   i,flowlo          ;buffer lower watermark?
             iflo  disc_flow
                lds   i,flow_cmd
@@ -2966,13 +3542,19 @@ skip_main:
       out   dbusddr,zero      ;dbus = input
       out   cbus,readmem      ;OE / read mode back on
    .endif
+   .ifdef mmu_vld
+;      rcall mmu_set_emu_nosync ;reset banks for emulator
+      load_mmu mmu_emu                  
+      out   dbusddr,zero      ;dbus = input
+      out   cbus,readmem      ;OE / read mode back on
+   .endif
    lds   a,sp_save         ;restore sp to main loop
    out   spl,a
    lds   a,sp_save+1
    out   sph,a
    sbrc  flags,deb_act     ;on error
       rjmp  end_command       ;debugger or
-   rcall crlf 
+;   rcall crlf 
    rjmp  end_exit          ;next instruction
 ;
 ; Read Hex Byte from RX fifo or direct and exit on <ESC>
@@ -3102,44 +3684,72 @@ eep_auto_write:
    ret
 .endif
 
-; Messages part 2 (part 1 moved before opcode table to reduce empty space)
-;                              word count, X = don't use in part 1 ---> ;##
+; Messages
+;                                                       word count ---> ;##
 .ifdef cmos_core
-stp_instr:     .db   "STP - Emulator halted",0                          ; X
+stp_instr:     .db   "STP - Emulator halted",0                          ;11
 .else
-inv_instr:     .db   "Illegal Opcode ",0                                ; X
+inv_instr:     .db   "Illegal Opcode ",0                                ; 8
 .endif
-emu_msg:       .db   13,10,13,10,core_string," Emulator V",version,0    ; X
+emu_msg:       .db   13,10,13,10,core_string," Emulator V",version,0    ;13
 built_msg:     .db   " built ",__DATE__," ",__TIME__,0                  ;14
-;load_wait:     .db   13,10,"Loading, <ESC> to abort",13,10,0            ;14
-;load_abort:    .db   " Load aborted",0                                  ; 7
+load_wait:     .db   13,10,"Loading, <ESC> to abort",13,10,0            ;14
+load_abort:    .db   " Load aborted",0                                  ; 7
 err_chksum:    .db   " Checksum failed",0,0                             ; 9
-;rs_vect_empty: .db   13,10,"Check reset vector",0,0                     ;11
-;reset_msg:     .db   "  Reset",0                                        ; 4
-;bpt_clrd_msg:  .db   10,13,"All breakpoints cleared",0                  ;13
-;bpt_info:      .db   10,13,"Breakpoints  (slot#:address)",13,10,0,0     ;17
+rs_vect_empty: .db   13,10,"Check reset vector",0,0                     ;11
+reset_msg:     .db   "  Reset",0                                        ; 4
+bpt_clrd_msg:  .db   10,13,"All breakpoints cleared",0                  ;13
+.ifdef mmu_vld
+bpt_info:      .db   10,13,"Breakpoints  (slot#:bank.address)",13,10,0  ;19
+.else
+bpt_info:      .db   10,13,"Breakpoints  (slot#:address)",13,10,0,0     ;17
+.endif
 bpt_info_none: .db   10,13,"No breakpoints active",0                    ;12
-;bpt_slot_full: .db   10,13,"No more breakpoint slots available",0,0     ;19
-.ifdef irq_dis_real    ;more messages not in part 1
+bpt_slot_full: .db   10,13,"No more breakpoint slots available",0,0     ;19
+emu_stopped:   .db   10,13,"Emulator stopped",0,0                       ;10
+rx_break_msg:  .db   10,13,"Terminal break signal detected",0,0         ;17
 load_ok:       .db   13,"Load OK",0,0                                   ; 5
 err_nonhex:    .db   " Non-Hex data in record",0                        ;12
 err_func:      .db   " Invalid function or count in record",0,0         ;19
 illegal_int:   .db   13,10,"AVR Illegal Interrupt",0                    ;12
 back_line:     .db   13,27,91,"K",27,91,"1A",0,0                        ; 5
+.ifdef mmu_vld
+bank_info_emu: .db   10,13,"Emulator banks: ",0,0                       ;10
+bank_info_mon: .db   " - Monitor banks: ",0,0                           ;10
+bank_info_syn: .db   "sync",0,0                                         ; 3
 .endif
 
 
-;verify minimum versions of includes
+;verify versions of includes
+;above base versions
+.if   io_version > base_version
+   .error "6502_Emu_IO.inc is above the base version!"
+.endif
+.ifdef   cmos_core
+   .if   core_version > base_version
+      .error "6502_Emu_CMOS.inc is above the base version!"
+   .endif
+.else
+   .if   core_version > base_version
+      .error "6502_Emu_NMOS.inc is above the base version!"
+   .endif
+.endif
+.if   config_version > base_version
+   .error "6502_Emu_config.inc is above the base version!"
+.endif
+.if   sam_version > base_version
+   .error "sam.inc is above the base version!"
+.endif
 ;required versions
-.if   io_version < 833
+.if   io_version < 840
    .error "6502_Emu_IO.inc is below the required minimum version!"
 .endif
 .ifdef   cmos_core
-   .if   core_version < 831
+   .if   core_version < 840
       .error "6502_Emu_CMOS.inc is below the required minimum version!"
    .endif
 .else
-   .if   core_version < 831
+   .if   core_version < 840
       .error "6502_Emu_NMOS.inc is below the required minimum version!"
    .endif
 .endif
@@ -3149,41 +3759,22 @@ back_line:     .db   13,27,91,"K",27,91,"1A",0,0                        ; 5
 .if   sam_version < 810
    .error "sam.inc is below the required minimum version!"
 .endif
-;above base versions
-.if   io_version > 833
-   .error "6502_Emu_IO.inc is above the base version!"
-.endif
-.ifdef   cmos_core
-   .if   core_version > 833
-      .error "6502_Emu_CMOS.inc is above the base version!"
-   .endif
-.else
-   .if   core_version > 833
-      .error "6502_Emu_NMOS.inc is above the base version!"
-   .endif
-.endif
-.if   config_version > 833
-;   .error "6502_Emu_config.inc is above the base version!"
-.endif
-.if   sam_version > 833
-   .error "sam.inc is above the base version!"
-.endif
 ;recommended versions
-.if   io_version < 833
+.if   io_version < 840
    .warning "6502_Emu_IO.inc is below the recommended minimum version!"
 .endif
 .ifdef   cmos_core
-   .if   core_version < 831
+   .if   core_version < 840
       .warning "6502_Emu_CMOS.inc is below the recommended minimum version!"
    .endif
 .else
-   .if   core_version < 831
+   .if   core_version < 840
       .warning "6502_Emu_NMOS.inc is below the recommended minimum version!"
    .endif
 .endif
-.if   config_version < 830
+.if   config_version < 840
    .warning "6502_Emu_config.inc is below the recommended minimum version!"
 .endif
-.if   sam_version < 810
+.if   sam_version < 840
    .warning "sam.inc is below the recommended minimum version!"
 .endif

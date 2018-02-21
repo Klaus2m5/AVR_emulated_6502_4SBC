@@ -1,0 +1,17 @@
+        org    $1000
+start   lda #$1e
+        ldx #0
+        ldy #0
+loop
+        sta $bf72
+        lda $bf72
+        cmp #$1e
+        beq loop
+        inx
+        lda $bf72
+        cmp #$1e
+        beq loop
+        iny
+        jmp loop
+        end start
+        

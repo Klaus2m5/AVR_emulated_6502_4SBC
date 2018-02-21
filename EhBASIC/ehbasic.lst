@@ -8,7 +8,7 @@
 00008    
 00009    ; 32k RAM mirrored = 12k EhBASIC code at top + 20k work space at bottom
 00010    
-00011      0300             Ram_base		= $0300	; start of user RAM (set as needed, should be page aligned)
+00011      0300             Ram_base		= $0300	; start of user RAM (set as needed, must be page aligned)
 00012      5000             Ram_top		= $5000	; end of user RAM+1 (set as needed, should be page aligned)
 00013    
 00014    ; This start can be changed to suit your system
@@ -7120,7 +7120,7 @@
 07120    
 07121    EE41  D0 BE        	BNE	GoPr1			; else go make output string (branch always)
 07122    
-07123    ; convert A to ASCII hex byte and output .. note set decimal mode before calling
+07123    ; convert A to ASCII hex byte and output
 07124    
 07125    LAB_A2HX
 07126    EE43  AA           	TAX				; save byte
@@ -8705,230 +8705,275 @@
 08705      BFFE             IR_mask	= IO_PAGE+$e	; interrupt enable mask
 08706    
 08707    ; now the code. all this does is set up the vectors and interrupt code
-08708    ; and wait for the user to select [C]old or [W]arm start. nothing else
-08709    ; fits in less than 256 bytes
-08710    
-08711    FE00               	*=	$FE00		; pretend this is in a 1/2K ROM
-08712    
-08713    ; reset vector points here
-08714    
-08715    RES_vec
-08716    FE00  D8           	CLD			; clear decimal mode
-08717    FE01  A2 FF        	LDX	#$FF		; empty stack
-08718    FE03  9A           	TXS			; set the stack
-08719    
-08720    ; set up vectors and interrupt code, copy them to page 2
-08721    
-08722    FE04  A0 0C        	LDY	#END_vec-LAB_vec	; set index/count
-08723    LAB_stlp
-08724    FE06  B9 E9 FE     	LDA	LAB_vec-1,Y	; get byte from interrupt code
-08725    FE09  99 04 02     	STA	VEC_IN-1,Y	; save to RAM
-08726    FE0C  88           	DEY			; decrement index/count
-08727    FE0D  D0 F7        	BNE	LAB_stlp	; loop if more to do
-08728    
-08729    ; now do the signon message, Y = $00 here
-08730    
-08731    LAB_signon
-08732    FE0F  B9 13 FF     	LDA	LAB_mess,Y	; get byte from sign on message
-08733    FE12  F0 06        	BEQ	LAB_nokey	; exit loop if done
-08734    
-08735    FE14  20 FA F0     	JSR	V_OUTP	; output character
-08736    FE17  C8           	INY			; increment index
-08737    FE18  D0 F5        	BNE	LAB_signon	; loop, branch always
-08738    
-08739    LAB_nokey
-08740    FE1A  20 F7 F0     	JSR	V_INPT	; call scan input device
-08741    FE1D  90 FB        	BCC	LAB_nokey	; loop if no key
-08742    
-08743    FE1F  29 DF        	AND	#$DF		; mask xx0x xxxx, ensure upper case
-08744    FE21  C9 57        	CMP	#'W'		; compare with [W]arm start
-08745    FE23  F0 07        	BEQ	LAB_dowarm	; branch if [W]arm start
-08746    
-08747    FE25  C9 43        	CMP	#'C'		; compare with [C]old start
-08748    FE27  D0 D7        	BNE	RES_vec	; loop if not [C]old start
-08749    
-08750    FE29  4C 03 D0     	JMP	LAB_COLD	; do EhBASIC cold start
-08751    
-08752    LAB_dowarm
-08753    FE2C  4C 00 00     	JMP	LAB_WARM	; do EhBASIC warm start
-08754    
-08755    ; byte out to emulated ACIA
-08756    
-08757    ACIAout
-08758    FE2F  C9 08        	CMP	#8		; backspace?
-08759    FE31  D0 0A        	BNE	skip_bs
-08760    FE33  8D F0 BF     	STA	ACIAtx	; make erasing backspace
-08761    FE36  A9 20        	LDA	#' '
-08762    FE38  8D F0 BF     	STA	ACIAtx
-08763    FE3B  A9 08        	LDA	#8
-08764    skip_bs
-08765    FE3D  8D F0 BF     	STA	ACIAtx	; send byte to ACIA
-08766    FE40  60           	RTS
-08767    
-08768    ; byte in from emulated ACIA
-08769    
-08770    ACIAin
-08771    FE41  AD F0 BF     	LDA	ACIArx	; test data available
-08772    FE44  F0 35        	BEQ	LAB_nobyw	; branch if no byte waiting
-08773    FE46  C9 7F        	CMP 	#127        ; convert delete to backspace
-08774    FE48  D0 02        	BNE 	conv_bs2del
-08775    FE4A  A9 08        	LDA 	#8
-08776    conv_bs2del
-08777    FE4C  C9 1B        	CMP 	#27         ; escape?
-08778    FE4E  D0 27        	BNE 	skip_esc_no
-08779    FE50  8A           	TXA       		; discard escape sequence
-08780    FE51  48           	PHA
-08781    FE52  A2 05        	LDX 	#5		; timer loop - 5*10ms
-08782    skip_esc_next
-08783    FE54  A9 01        	LDA 	#1		; ack last tick
-08784    FE56  8D FF BF     	STA 	EMU_flag
-08785    skip_esc_wait  
-08786    FE59  AD FF BF     	LDA 	EMU_flag
-08787    FE5C  29 01        	AND 	#1		; next tick
-08788    FE5E  F0 F9        	BEQ 	skip_esc_wait
-08789    FE60  CA           	DEX
-08790    FE61  D0 F1        	BNE 	skip_esc_next
-08791    skip_esc_discard  
-08792    FE63  E8           	INX			; any data = X > 1
-08793    FE64  AD F0 BF     	LDA 	ACIArx
-08794    FE67  D0 FA        	BNE 	skip_esc_discard
-08795    FE69  E0 01        	CPX 	#1
-08796    FE6B  F0 06        	BEQ 	skip_esc_esc
-08797    FE6D  68           	PLA			; was special key - skip
-08798    FE6E  AA           	TAX
-08799    FE6F  A9 00        	LDA 	#0
-08800    FE71  18           	CLC
-08801    FE72  60           	RTS
-08802    skip_esc_esc		; escape only - send to basic  
-08803    FE73  68           	PLA
-08804    FE74  AA           	TAX
-08805    FE75  A9 1B        	LDA 	#27
-08806    
-08807    skip_esc_no
-08808    FE77  49 00        	EOR 	#0		; set flags NZ
-08809    FE79  38           	SEC			; flag byte received
-08810    FE7A  60           	RTS
+08708    ; and wait for the user to select [C]old or [W]arm start.
+08709    
+08710    FE00               	*=	$FE00		; pretend this is in a 1/2K ROM
+08711    
+08712    ; reset vector points here
+08713    
+08714    RES_vec
+08715    FE00  D8           	CLD			; clear decimal mode
+08716    FE01  A2 FF        	LDX	#$FF		; empty stack
+08717    FE03  9A           	TXS			; set the stack
+08718    
+08719    ; set up vectors and interrupt code, copy them to page 2
+08720    
+08721    FE04  A0 0C        	LDY	#END_vec-LAB_vec	; set index/count
+08722    LAB_stlp
+08723    FE06  B9 33 FF     	LDA	LAB_vec-1,Y	; get byte from interrupt code
+08724    FE09  99 04 02     	STA	VEC_IN-1,Y	; save to RAM
+08725    FE0C  88           	DEY			; decrement index/count
+08726    FE0D  D0 F7        	BNE	LAB_stlp	; loop if more to do
+08727    
+08728    ; now do the signon message, Y = $00 here
+08729    
+08730    LAB_signon
+08731    FE0F  20 2E FF     	JSR	prt_msg	; Y=0 - print signon message
+08732    
+08733    LAB_nokey
+08734    FE12  20 F7 F0     	JSR	V_INPT	; call scan input device
+08735    FE15  90 FB        	BCC	LAB_nokey	; loop if no key
+08736    
+08737    FE17  29 DF        	AND	#$DF		; mask xx0x xxxx, ensure upper case
+08738    FE19  C9 57        	CMP	#'W'		; compare with [W]arm start
+08739    FE1B  F0 07        	BEQ	LAB_dowarm	; branch if [W]arm start
+08740    
+08741    FE1D  C9 43        	CMP	#'C'		; compare with [C]old start
+08742    FE1F  D0 DF        	BNE	RES_vec	; loop if not [C]old start
+08743    
+08744    FE21  4C 03 D0     	JMP	LAB_COLD	; do EhBASIC cold start
+08745    
+08746    LAB_dowarm
+08747    FE24  4C 00 00     	JMP	LAB_WARM	; do EhBASIC warm start
+08748    
+08749    ; byte out to emulated ACIA
+08750    
+08751    ACIAout
+08752    FE27  C9 08        	CMP	#8		; backspace?
+08753    FE29  D0 0A        	BNE	skip_bs
+08754    FE2B  8D F0 BF     	STA	ACIAtx	; make erasing backspace
+08755    FE2E  A9 20        	LDA	#' '
+08756    FE30  8D F0 BF     	STA	ACIAtx
+08757    FE33  A9 08        	LDA	#8
+08758    skip_bs
+08759    FE35  8D F0 BF     	STA	ACIAtx	; send byte to ACIA
+08760    FE38  60           	RTS
+08761    
+08762    ; byte in from emulated ACIA
+08763    
+08764    ACIAin
+08765    FE39  AD F0 BF     	LDA	ACIArx	; test data available
+08766    FE3C  F0 35        	BEQ	LAB_nobyw	; branch if no byte waiting
+08767    FE3E  C9 7F        	CMP 	#127        ; convert delete to backspace
+08768    FE40  D0 02        	BNE 	conv_bs2del
+08769    FE42  A9 08        	LDA 	#8
+08770    conv_bs2del
+08771    FE44  C9 1B        	CMP 	#27         ; escape?
+08772    FE46  D0 27        	BNE 	skip_esc_no
+08773    FE48  8A           	TXA       		; discard escape sequence
+08774    FE49  48           	PHA
+08775    FE4A  A2 05        	LDX 	#5		; timer loop - 5*10ms
+08776    skip_esc_next
+08777    FE4C  A9 01        	LDA 	#1		; ack last tick
+08778    FE4E  8D FF BF     	STA 	EMU_flag
+08779    skip_esc_wait  
+08780    FE51  AD FF BF     	LDA 	EMU_flag
+08781    FE54  29 01        	AND 	#1		; next tick
+08782    FE56  F0 F9        	BEQ 	skip_esc_wait
+08783    FE58  CA           	DEX
+08784    FE59  D0 F1        	BNE 	skip_esc_next
+08785    skip_esc_discard  
+08786    FE5B  E8           	INX			; any data = X > 1
+08787    FE5C  AD F0 BF     	LDA 	ACIArx
+08788    FE5F  D0 FA        	BNE 	skip_esc_discard
+08789    FE61  E0 01        	CPX 	#1
+08790    FE63  F0 06        	BEQ 	skip_esc_esc
+08791    FE65  68           	PLA			; was special key - skip
+08792    FE66  AA           	TAX
+08793    FE67  A9 00        	LDA 	#0
+08794    FE69  18           	CLC
+08795    FE6A  60           	RTS
+08796    skip_esc_esc		; escape only - send to basic  
+08797    FE6B  68           	PLA
+08798    FE6C  AA           	TAX
+08799    FE6D  A9 1B        	LDA 	#27
+08800    
+08801    skip_esc_no
+08802    FE6F  49 00        	EOR 	#0		; set flags NZ
+08803    FE71  38           	SEC			; flag byte received
+08804    FE72  60           	RTS
+08805    
+08806    LAB_nobyw
+08807    FE73  18           	CLC			; flag no byte received
+08808    FE74  60           	RTS
+08809    		
+08810    ; save a program to EEPROM by number
 08811    
-08812    LAB_nobyw
-08813    FE7B  18           	CLC			; flag no byte received
-08814    FE7C  60           	RTS
-08815    
-08816    ; load a program from EEPROM by number
-08817    
-08818    load_eep
-08819    FE7D  20 B8 FE     	JSR	check_prognum
-08820    FE80  A9 07        	LDA	#7		; load command
-08821    FE82  8D F7 BF     	STA	EEP_cmd
-08822    FE85  2C F7 BF     	BIT	EEP_stat	; test for ack
-08823    FE88  C9 FF        	CMP	#$ff
-08824    FE8A  D0 03        	BNE	load_ok
-08825    FE8C  4C C2 00     	JMP	LAB_GBYT	; continue
-08826    load_ok
-08827    FE8F  AD F8 BF     	LDA	EEP_data	; set end_address
-08828    FE92  85 7B        	STA	Svarl
-08829    FE94  AD F8 BF     	LDA	EEP_data
-08830    FE97  85 7C        	STA	Svarh
-08831    FE99  A9 04        	LDA	#<LAB_RMSG	; "READY"
-08832    FE9B  A0 F8        	LDY	#>LAB_RMSG
-08833    FE9D  20 C7 D8     	JSR	LAB_18C3
-08834    FEA0  4C 07 D2     	JMP	LAB_1319	; rebuild line pointers	
-08835    		
-08836    ; save a program to EEPROM by number
-08837    
-08838    save_eep
-08839    FEA3  20 B8 FE     	JSR	check_prognum
-08840    FEA6  A5 7B        	LDA	Svarl		; set end address
-08841    FEA8  8D F8 BF     	STA	EEP_data
-08842    FEAB  A5 7C        	LDA	Svarh
-08843    FEAD  8D F8 BF     	STA	EEP_data
-08844    FEB0  A9 06        	LDA	#6		; save command
-08845    FEB2  8D F7 BF     	STA	EEP_cmd
-08846    FEB5  4C C2 00     	JMP	LAB_GBYT	; continue 
-08847    
-08848    ; check program number for validity (0-0xfe)
-08849    ; 0xff drops to debugger to allow EEPROM utility commands
-08850    
-08851    check_prognum
-08852    FEB8  20 C1 DA     	JSR	LAB_EVNM	; get program number to load
-08853    FEBB  20 E5 E4     	JSR	LAB_F2FX	; convert to integer
-08854    FEBE  A5 12        	LDA	Itemph	; filenumber range 0-0xfe
-08855    FEC0  F0 05        	BEQ	prog_num_ok
-08856    FEC2  68           	PLA			; discard return address
-08857    FEC3  68           	PLA
-08858    FEC4  4C 1D DF     	JMP	LAB_FCER	; msg "function call error"
-08859    prog_num_ok	
-08860    FEC7  A5 11        	LDA	Itempl
-08861    FEC9  C9 FF        	CMP	#$ff		; special number
-08862    FECB  D0 0A        	BNE	prog_set_start
-08863    FECD  A9 80        	LDA	#$80		; drop to debugger
-08864    FECF  8D FC BF     	STA	EMU_diag
-08865    FED2  68           	PLA			; discard return address
-08866    FED3  68           	PLA
-08867    FED4  4C C2 00     	JMP	LAB_GBYT	; continue
-08868    prog_set_start
-08869    FED7  A2 00        	LDX	#0		; set eep command
-08870    FED9  8E F7 BF     	STX	EEP_cmd
-08871    FEDC  8D F8 BF     	STA	EEP_data	; set program number
-08872    FEDF  A5 79        	LDA	Smeml		; set load address
-08873    FEE1  8D F8 BF     	STA	EEP_data
-08874    FEE4  A5 7A        	LDA	Smemh
-08875    FEE6  8D F8 BF     	STA	EEP_data
-08876    FEE9  60           	RTS
+08812    save_eep
+08813    FE75  20 F8 FE     	JSR	check_prognum
+08814    FE78  A5 7B        	LDA	Svarl		; set end address
+08815    FE7A  8D F8 BF     	STA	EEP_data
+08816    FE7D  A5 7C        	LDA	Svarh
+08817    FE7F  8D F8 BF     	STA	EEP_data
+08818    FE82  A9 06        	LDA	#6		; save command
+08819    FE84  8D F7 BF     	STA	EEP_cmd
+08820    FE87  AD F7 BF     	LDA	EEP_stat
+08821    FE8A  C9 16        	CMP	#$16
+08822    FE8C  F0 26        	BEQ	save_fail
+08823    FE8E  4C C2 00     	JMP	LAB_GBYT	; continue 
+08824    
+08825    ; load a program from EEPROM by number
+08826    
+08827    load_eep
+08828    FE91  20 F8 FE     	JSR	check_prognum
+08829    FE94  A9 07        	LDA	#7		; load command
+08830    FE96  8D F7 BF     	STA	EEP_cmd
+08831    FE99  AD F7 BF     	LDA	EEP_stat	; test for ack
+08832    FE9C  C9 17        	CMP	#$17		; load complete?
+08833    FE9E  D0 14        	BNE	load_fail
+08834    FEA0  AD F8 BF     	LDA	EEP_data	; set end_address
+08835    FEA3  85 7B        	STA	Svarl
+08836    FEA5  AD F8 BF     	LDA	EEP_data
+08837    FEA8  85 7C        	STA	Svarh
+08838    FEAA  A9 04        	LDA	#<LAB_RMSG	; "READY"
+08839    FEAC  A0 F8        	LDY	#>LAB_RMSG
+08840    FEAE  20 C7 D8     	JSR	LAB_18C3
+08841    FEB1  4C 07 D2     	JMP	LAB_1319	; rebuild line pointers	
+08842    load_fail
+08843    save_fail
+08844    FEB4  C9 EF        	CMP	#$ef		; program not found
+08845    FEB6  D0 08        	BNE	load_ef
+08846    FEB8  A0 1F        	LDY	#msg_ef-msg_pool
+08847    FEBA  20 2E FF     	JSR	prt_msg	
+08848    FEBD  4C C2 00     	JMP	LAB_GBYT	; continue
+08849    load_ef
+08850    FEC0  C9 EE        	CMP	#$ee		; EEPROM full
+08851    FEC2  D0 08        	BNE	save_ee
+08852    FEC4  A0 31        	LDY	#msg_ee-msg_pool
+08853    FEC6  20 2E FF     	JSR	prt_msg	
+08854    FEC9  4C C2 00     	JMP	LAB_GBYT	; continue
+08855    save_ee	
+08856    FECC  C9 ED        	CMP	#$ed		; EEPROM unaccessible
+08857    FECE  D0 08        	BNE	load_ed
+08858    FED0  A0 3D        	LDY	#msg_ed-msg_pool
+08859    FED2  20 2E FF     	JSR	prt_msg	
+08860    FED5  4C C2 00     	JMP	LAB_GBYT	; continue
+08861    load_ed	
+08862    FED8  C9 EA        	CMP	#$ea		; program incompatible (Intel Hex)
+08863    FEDA  D0 08        	BNE	load_ea
+08864    FEDC  A0 51        	LDY	#msg_ea-msg_pool
+08865    FEDE  20 2E FF     	JSR	prt_msg	
+08866    FEE1  4C C2 00     	JMP	LAB_GBYT	; continue
+08867    load_ea
+08868    FEE4  C9 E9        	CMP	#$e9		; program damaged
+08869    FEE6  D0 08        	BNE	load_e9
+08870    FEE8  A0 66        	LDY	#msg_e9-msg_pool
+08871    FEEA  20 2E FF     	JSR	prt_msg	
+08872    FEED  4C 44 D3     	JMP	LAB_1463	; perform NEW
+08873    load_e9			; unspecified internal error
+08874    FEF0  A0 76        	LDY	#msg_ff-msg_pool
+08875    FEF2  20 2E FF     	JSR	prt_msg	
+08876    FEF5  4C C2 00     	JMP	LAB_GBYT	; continue
 08877    
-08878    ; vector tables
-08879    
-08880    LAB_vec
-08881    	.word	ACIAin		; byte in from simulated ACIA
-08882    	.word	ACIAout		; byte out to simulated ACIA
-08883    	.word	load_eep		; load program from EEPROM
-08884    	.word	save_eep		; save program to EEPROM
-08885    	.word	IRQ_CODE		; vector to handle IRQ 
-08886    	.word	NMI_CODE		; vector to handle IRQ 
-08887    END_vec
-08888    
-08889    ; EhBASIC IRQ support
-08890    
-08891    IRQ_vec
-08892    ;	JMP	(IRQ_indirect)	; jump through a vector in RAM
-08893    					; uncomment if needed
-08894    IRQ_CODE
-08895    FEF6  85 E2        	STA	irq_a_reg		; save A
-08896    FEF8  A5 DF        	LDA	IrqBase		; get the IRQ flag byte
-08897    FEFA  D0 03        	BNE	IRQ_IS_SET		; Basic ready to handle?
-08898    FEFC  8D FE BF     	STA	IR_mask		; no, silence internal interrupts 
-08899    IRQ_IS_SET
-08900    FEFF  09 20        	ORA	#$20			; 00100000 set IRQ pending
-08901    FF01  85 DF        	STA	IrqBase		; save the new IRQ flag byte
-08902    FF03  68           	PLA				; pop saved flags
-08903    FF04  09 04        	ORA	#4			; set interrupt disable on stack
-08904    FF06  48           	PHA				; save flags again for RTI
-08905    FF07  A5 E2        	LDA	irq_a_reg		; restore A
-08906    FF09  40           	RTI				; return disabled!
-08907    	
-08908    ; EhBASIC NMI support
+08878    ; check program number for validity (0-0xfe)
+08879    ; 0xff drops to debugger to allow EEPROM utility commands
+08880    
+08881    check_prognum
+08882    FEF8  20 C1 DA     	JSR	LAB_EVNM	; get program number to load
+08883    FEFB  20 E5 E4     	JSR	LAB_F2FX	; convert to integer
+08884    FEFE  A5 12        	LDA	Itemph	; filenumber range 0-0xfe
+08885    FF00  F0 05        	BEQ	prog_num_ok
+08886    FF02  68           	PLA			; discard return address
+08887    FF03  68           	PLA
+08888    FF04  4C 1D DF     	JMP	LAB_FCER	; msg "function call error"
+08889    prog_num_ok	
+08890    FF07  A5 11        	LDA	Itempl
+08891    FF09  C9 FF        	CMP	#$ff		; special number
+08892    FF0B  D0 0A        	BNE	prog_set_start
+08893    FF0D  A9 80        	LDA	#$80		; drop to debugger
+08894    FF0F  8D FC BF     	STA	EMU_diag
+08895    FF12  68           	PLA			; discard return address
+08896    FF13  68           	PLA
+08897    FF14  4C C2 00     	JMP	LAB_GBYT	; continue
+08898    prog_set_start
+08899    FF17  A2 00        	LDX	#0		; set eep command
+08900    FF19  8E F7 BF     	STX	EEP_cmd
+08901    FF1C  8D F8 BF     	STA	EEP_data	; set program number
+08902    FF1F  A5 79        	LDA	Smeml		; set load address
+08903    FF21  8D F8 BF     	STA	EEP_data
+08904    FF24  A5 7A        	LDA	Smemh
+08905    FF26  8D F8 BF     	STA	EEP_data
+08906    FF29  60           	RTS
+08907    
+08908    ; print load/save errormessage
 08909    
-08910    NMI_vec
-08911    ;	JMP	(NMI_indirect)	; jump through a vector in RAM
-08912    					; uncomment if needed
-08913    NMI_CODE
-08914    FF0A  48           	PHA				; save A
-08915    FF0B  A5 DC        	LDA	NmiBase		; get the NMI flag byte
-08916    FF0D  09 20        	ORA	#$20			; 00100000 set NMI pending
-08917    FF0F  85 DC        	STA	NmiBase		; save the new NMI flag byte
-08918    FF11  68           	PLA				; restore A
-08919    FF12  40           	RTI
-08920    
-08921    LAB_mess
-08922    	.byte	$0D,$0A,"6502 EhBASIC [C]old/[W]arm ?",$00
-08923    					; sign on string
-08924    
-08925    ; system vectors
-08926    
-08927    FFFA               	*=	$FFFA
+08910    prt_msg_loop
+08911    FF2A  20 FA F0     	JSR	V_OUTP
+08912    FF2D  C8           	INY
+08913    prt_msg
+08914    FF2E  B9 5D FF     	LDA	msg_pool,y
+08915    FF31  D0 F7        	BNE	prt_msg_loop
+08916    FF33  60           	RTS
+08917    	
+08918    ; vector tables
+08919    
+08920    LAB_vec
+08921    	.word	ACIAin		; byte in from simulated ACIA
+08922    	.word	ACIAout		; byte out to simulated ACIA
+08923    	.word	load_eep		; load program from EEPROM
+08924    	.word	save_eep		; save program to EEPROM
+08925    	.word	IRQ_CODE		; vector to handle IRQ 
+08926    	.word	NMI_CODE		; vector to handle IRQ 
+08927    END_vec
 08928    
-08929    	.word	NMI_vec		; NMI vector
-08930    	.word	RES_vec		; RESET vector
-08931    	.word	IRQ_vec		; IRQ vector
-08932    
-08933    
-08934    
+08929    ; EhBASIC IRQ support
+08930    
+08931    IRQ_vec
+08932    ;	JMP	(IRQ_indirect)	; jump through a vector in RAM
+08933    					; uncomment if needed
+08934    IRQ_CODE
+08935    FF40  85 E2        	STA	irq_a_reg		; save A
+08936    FF42  A5 DF        	LDA	IrqBase		; get the IRQ flag byte
+08937    FF44  D0 03        	BNE	IRQ_IS_SET		; Basic ready to handle?
+08938    FF46  8D FE BF     	STA	IR_mask		; no, silence internal interrupts 
+08939    IRQ_IS_SET
+08940    FF49  09 20        	ORA	#$20			; 00100000 set IRQ pending
+08941    FF4B  85 DF        	STA	IrqBase		; save the new IRQ flag byte
+08942    FF4D  68           	PLA				; pop saved flags
+08943    FF4E  09 04        	ORA	#4			; set interrupt disable on stack
+08944    FF50  48           	PHA				; save flags again for RTI
+08945    FF51  A5 E2        	LDA	irq_a_reg		; restore A
+08946    FF53  40           	RTI				; return disabled!
+08947    	
+08948    ; EhBASIC NMI support
+08949    
+08950    NMI_vec
+08951    ;	JMP	(NMI_indirect)	; jump through a vector in RAM
+08952    					; uncomment if needed
+08953    NMI_CODE
+08954    FF54  48           	PHA				; save A
+08955    FF55  A5 DC        	LDA	NmiBase		; get the NMI flag byte
+08956    FF57  09 20        	ORA	#$20			; 00100000 set NMI pending
+08957    FF59  85 DC        	STA	NmiBase		; save the new NMI flag byte
+08958    FF5B  68           	PLA				; restore A
+08959    FF5C  40           	RTI
+08960    
+08961    msg_pool
+08962    LAB_mess	.byte	$0D,$0A,"6502 EhBASIC [C]old/[W]arm ?",$00
+08963    msg_ef	.byte	"program not found",0
+08964    msg_ee	.byte	"EEPROM full",0
+08965    msg_ed	.byte	"EEPROM unaccessible",0
+08966    msg_ea	.byte	"program incompatible",0
+08967    msg_e9	.byte	"program damaged",0
+08968    msg_ff	.byte	"min_mon error",0
+08969    
+08970    ; system vectors
+08971    
+08972    FFFA               	*=	$FFFA
+08973    
+08974    	.word	NMI_vec		; NMI vector
+08975    	.word	RES_vec		; RESET vector
+08976    	.word	IRQ_vec		; IRQ vector
+08977    
+08978    
+08979    

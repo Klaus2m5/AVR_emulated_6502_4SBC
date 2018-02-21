@@ -1,0 +1,73 @@
+;
+; bit bang methods
+;
+iomap   equ $bf00       ;I/O page (A15:8)
+; IO subprocessor (ATMega16)
+ios_    equ iomap+$70   ;base address of the IO subprocessor
+ios_r0  equ ios_        ;IO register @ ios_adr, read/write
+ios_r1  equ ios_+1      ;IO register @ ios_adr+1, read/write
+ios_r2  equ ios_+2      ;IO register @ ios_adr+2, read/write
+ios_adr equ ios_+3      ;IO register address, write only
+ios_vec equ ios_+3      ;IRQ vector register, read only
+ios_ar  equ ios_+4      ;alternate IO register @ ios_aad, read/write
+ios_aad equ ios_+5      ;alternate IO register address, write only
+ios_xdr equ ios_+5      ;unit data register without special function, read only
+ios_dr  equ ios_+6      ;unit data register with extra functions, read/write
+ios_cr  equ ios_+7      ;command register, write only
+ios_drx equ ios_+7      ;current unit data register index, read only
+
+        nolist
+        include "m16def.i65"
+        list
+        
+        org $200
+        
+method1_initialize
+        lda #is_pina    ;point index to lowest port a register
+        sta ios_adr     ;r0 = input, r1 = ddr, r2 = output
+        lda #$f         ;pin 0-3 = output, pin 4-7 = input
+        sta ios_r1
+method1_write
+        lda #$aa        ;output = %xxxx1010, xxxx is ignored / input
+        sta ios_r2
+method1_read
+        lda ios_r0      ;input = %xxxxyyyy, xxxx = input, yyyy = previous output
+        
+method2_initialize
+        lda #is_ddrd    ;point alternate index to port d ddr register
+        sta ios_aad
+        lda #$c0        ;pin 6-7 = output, pin 0-5 = input
+        sta ios_ar
+        lda #is_portd   ;point alternate index to port d output register
+        sta ios_aad
+method2_write
+        lda #$40        ;set bit 6, clear bit 7
+        sta ios_ar
+method2_read
+        lda ios_ar      ;a read always selects the input register of a port!
+method2_toggle
+        lda #is_portd+$c0   ;set (logical or) bits to register
+        sta ios_aad         ;+$80 = clear (logical and with complement)
+        lda #$80        ;bit 7
+        sta ios_ar      ;set bit 7
+        sta ios_ar      ;clear bit 7
+        sta ios_ar      ;set bit 7
+        ;...
+        
+regbit  macro   ;\1 0=clear, 1=set, \2 0-31 = bitmap #
+        lda #$40|(\1<<5)|\2
+        sta ios_cr
+        endm
+
+portbit macro   ;\1 0=clear, 1=set, \2 0=port, 1=ddr
+                ;\3 0-3 = port a-d, \4 0-7 = bit
+        lda #$80|(\2<<6)|(\3<<4)|(\1<<3)|\4
+        sta ios_cr
+        endm
+        
+method3_initialize
+        portbit 1,1,1,3 ;set ddr port b pin 3 (b3 = output)
+method3_write
+        portbit 1,0,1,3 ;set port b pin 3 (b3 = 1)
+        portbit 0,0,1,3 ;clear port b pin 3 (b3 = 0)
+        ; there is no read for this method!

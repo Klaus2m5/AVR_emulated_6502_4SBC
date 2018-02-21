@@ -1,0 +1,70 @@
+;
+; monitor delay test
+;
+iomap   equ $bf00       ;I/O page (A15:8)
+; trace timer 
+t1_adr  equ iomap+$f4   ;timer 1 register address, read/write
+t1_dat  equ iomap+$f5   ;timer 1 register data, read/write
+
+        bss
+        org 0
+minimum     ds  2
+maximum     ds  2
+last_t1     ds  2
+dif_t1      ds  2
+        code        
+        org $1000
+
+start
+        lda #$ff            ;clear min/max
+        sta minimum
+        sta minimum+1
+        lda #0
+        sta maximum
+        sta maximum+1
+        lda #8              ;set t1_dat=tccr1
+        sta t1_adr
+        lda #2              ;clock /8, normal mode
+        sta t1_dat
+        lda #6              ;set t1_dat=tcnt1l
+        sta t1_adr
+loop    lda t1_dat
+        sta last_t1
+        lda t1_dat
+        sta last_t1+1
+        sec                 ;calculate difference
+        lda t1_dat
+        sbc last_t1
+        sta dif_t1
+        lda t1_dat
+        sbc last_t1+1
+        sta dif_t1+1
+        sec                 ;compare maximum
+        lda dif_t1
+        sbc maximum
+        lda dif_t1+1
+        sbc maximum+1
+        bcc skip_max 
+        lda dif_t1          ;new maximum time
+        sta maximum
+        lda dif_t1+1
+        sta maximum+1
+skip_max
+;        sec                 ;compare minimum
+        lda minimum
+        sbc dif_t1
+        lda minimum+1
+        sbc dif_t1+1
+        bcc loop 
+        lda dif_t1          ;new minimum time
+        sta minimum
+        lda dif_t1+1
+        sta minimum+1
+        bcs loop
+
+        org $fffc       ;reset vectors
+        dw  start       ;restart on reset
+        
+        end start
+        
+        

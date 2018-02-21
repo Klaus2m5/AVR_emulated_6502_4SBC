@@ -3,7 +3,7 @@
 ;   structured assembly macros (SAM)
 ;
 ;***************************************************************
-; Copyright (C) 2010-2013  Klaus Dormann
+; Copyright (C) 2010-2018  Klaus Dormann
 ;
 ; This program is free software: you can redistribute it and/or modify
 ; it under the terms of the GNU General Public License as published by
@@ -20,8 +20,8 @@
 ;
 ; contact info at http://2m5.de or email K@2m5.de
 ;
-.set  sam_version = 810
-; Version: 26.12.2010
+.set  sam_version = 840
+; Version: 16.08.2015 - now avoids mix of DO and IF statements
 ; requires a current version of AVRASM2
 ; see "sam_examples.asm" for usage examples
 ; 
@@ -33,9 +33,9 @@
 ;   All need a common label as the last and mostly only parameter.
 ;   Further if-then-else-end can be nested by asigning a different label.
 ;   The macros create additional labels as needed:
-;     for example @0 = test creates t_test & l_test
-;     test   = end of the THEN case
+;     for example @0 = test creates
 ;     t_test = begin of the THEN case
+;     e_test = end of the THEN case
 ;     l_test = end of the ELSE case
 ;   Condition dependent code execution:
 ;     true   = code after the IFxx or IFxx_far macro is executed
@@ -157,16 +157,16 @@
 ; IFBC <bit>,<label> - if bit is clear in SREG
 ;
 .macro      ifbc
-            brbs  @0,@1
+            brbs  @0,e_@1
             .equ  t_@1 = PC
 .endmacro
 .macro      ifbc_far 
             brbc  @0,pc+2
-            rjmp  @1
+            rjmp  e_@1
             .equ  t_@1 = PC
 .endmacro
 .macro      ifbc_and
-            brbs  @0,@1
+            brbs  @0,e_@1
 .endmacro
 .macro      ifbc_or
             brbc  @0,t_@1
@@ -175,16 +175,16 @@
 ; IFBS <bit>,<label> - if bit is set in SREG
 ;
 .macro      ifbs
-            brbc  @0,@1
+            brbc  @0,e_@1
             .equ  t_@1 = PC
 .endmacro
 .macro      ifbs_far 
             brbs  @0,pc+2
-            rjmp  @1
+            rjmp  e_@1
             .equ  t_@1 = PC
 .endmacro
 .macro      ifbs_and
-            brbc  @0,@1
+            brbc  @0,e_@1
 .endmacro
 .macro      ifbs_or
             brbs  @0,t_@1
@@ -193,16 +193,16 @@
 ; IFS <label> - if skip
 ;
 .macro      ifs
-            rjmp  @0
+            rjmp  e_@0
             .equ  t_@0 = PC
 .endmacro
 ; ifs is always far - just for completeness
 .macro      ifs_far 
-            rjmp  @0
+            rjmp  e_@0
             .equ  t_@0 = PC
 .endmacro
 .macro      ifs_and
-            rjmp  @0
+            rjmp  e_@0
 .endmacro
 .macro      ifs_or
             rjmp  pc+2
@@ -213,18 +213,24 @@
 ;       label  of the matching IFxx & END macro 
 ;
 .macro      else
+  .if !defined(t_@0)
+    .error  "SAM: Else without If"      
+  .endif
             rjmp  l_@0
-  .equ      @0 = PC
+  .equ      e_@0 = PC
 .endmacro
 ;
 ; END <label>
 ;      label  of the previous matching IFxx or ELSE macro
 ;
 .macro      end
-  .ifdef    @0
+  .if !defined(t_@0)
+    .error  "SAM: End without If"      
+  .endif
+  .if defined(e_@0)
     .equ    l_@0 = PC
   .else
-    .equ    @0 = PC
+    .equ    e_@0 = PC
   .endif
 .endmacro
 ;
@@ -235,9 +241,9 @@
 ;   All need a common label as the last and mostly only parameter.
 ;   Further do-loops can be nested by asigning a different label.
 ;   The macros create an additional label as needed:
-;     for example <label> = main creates x_main
-;     main   = begin of loop
-;     x_main = end of loop (used by EXIT)
+;     for example <label> = main creates
+;     d_main = begin of loop
+;     x_main = end of loop (set by unconditional LOOP only)
 ;
 ;   LOOPxx can only be used at the end of the do as an immediate
 ;   loop, if condition xx is true similar to a loop-while statement.
@@ -259,13 +265,16 @@
 ;     label  of the matching EXIT & LOOP or LOOPxx macros
 ;
 .macro      do
-  .equ      @0 = PC
+  .equ      d_@0 = PC
 .endmacro
 ;
 ; EXIT <label>
 ;       label  of the matching DO & LOOP macros
 ;
 .macro      exit
+  .if !defined(d_@0)
+    .error  "SAM: Exit without Do"      
+  .endif
             rjmp  x_@0
 .endmacro
 ;
@@ -273,7 +282,10 @@
 ;       label  of the matching DO & EXIT macros
 ;
 .macro      loop
-            rjmp  @0
+  .if !defined(d_@0)
+    .error  "SAM: Loop without Do"      
+  .endif
+            rjmp  d_@0
   .equ      x_@0 = PC
 .endmacro
 ;
@@ -346,24 +358,36 @@
 ; LOOPBC <bit>,<label> - loop if bit is clear in SREG
 ;
 .macro      loopbc
-            brbc  @0,@1
+  .if !defined(d_@1)
+    .error  "SAM: Loop without Do"      
+  .endif
+            brbc  @0,d_@1
 .endmacro
 ;
 ; LOOPBS <bit>,<label> - loop if bit is set in SREG
 ;
 .macro      loopbs
-            brbs  @0,@1
+  .if !defined(d_@1)
+    .error  "SAM: Loop without Do"      
+  .endif
+            brbs  @0,d_@1
 .endmacro
 ;
 ; EXITBC <bit>,<label> - exit if bit is clear in SREG
 ;
 .macro      exitbc
+  .if !defined(d_@1)
+    .error  "SAM: Exit without Do"      
+  .endif
             brbc  @0,x_@1
 .endmacro
 ;
 ; EXITBS <bit>,<label> - exit if bit is set in SREG
 ;
 .macro      exitbs
+  .if !defined(d_@1)
+    .error  "SAM: Exit without Do"      
+  .endif
             brbs  @0,x_@1
 .endmacro
 

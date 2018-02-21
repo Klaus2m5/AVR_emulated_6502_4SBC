@@ -1,0 +1,804 @@
+iomap   equ $bf00       ;I/O page (A15:8)
+; diag
+emu_dig equ iomap+$fc   ;diagnostic emulator flags, read/write
+; RS232
+ser_dat equ iomap+$f0   ;RS232 RX/TX data register, read/write
+ser_msk equ iomap+$fe   ;RS232 interrupt enable mask register, read/write
+ser_flg equ iomap+$ff   ;RS232 buffer flag register, read/write
+; timer
+tim_cdn equ iomap+$f1   ;10ms tick timer countdown register, read/write
+t1_adr  equ iomap+$f4   ;timer 1 register address, read/write
+t1_dat  equ iomap+$f5   ;timer 1 register data, read/write
+tim_msk equ iomap+$fe   ;timer interrupt enable mask register, read/write
+tim_flg equ iomap+$ff   ;timer flag register, read/write
+; IRQ vector
+irq_vec equ iomap+$fd   ;irq vector register, read only
+; character LCD
+lcd_cmd equ iomap+$d0   ;lcd command register, read/write
+lcd_dat equ iomap+$d1   ;lcd data register, read/write
+lcd_rcd equ iomap+$d2   ;lcd raw command register (no busy wait), read/write
+lcd_rdt equ iomap+$d3   ;lcd raw data register (no busy wait), read/write
+; I2C
+i2c_cmd equ iomap+$fd   ;i2c command register, write only
+i2c_sta equ iomap+$fd   ;i2c status register, read only
+i2c_dat equ iomap+$fc   ;i2c data register, read/write
+; SPI
+spi_cmd equ iomap+$f6   ;spi command register, write only
+spi_lrd equ iomap+$f6   ;spi last read data register, read only
+spi_dat equ iomap+$c0   ;spi data register set, read/write
+; SPI device list
+spi_sd  equ spi_dat+4   ;SD card slot
+;spi_165 equ spi_dat+1   ;74HC165 parallel input shift register
+;spi_595 equ spi_dat+2   ;74HC595 parallel output shift register
+;spi_eep equ spi_dat+3   ;25LC512 EEPROM
+spi_nss equ spi_dat+$f  ;no slave select
+; DMA
+dma_cmd equ iomap+$f7   ;dma command register, write only
+dma_sta equ iomap+$f7   ;dma status register, read only
+dma_dat equ iomap+$f8   ;dma data register, read/write
+
+spi_ful     equ $10     ;mode 0, 8MHz
+spi_slo     equ $02     ;mode 0, 250kHz
+
+use_dma     equ 1       ;>0 = use dma in multi block r/w
+clus_size   equ 64      ;number of sectors per cluster
+
+        bss
+        org 0
+sd_start    ds  1       ;speed & hold select
+sd_stop     ds  1       ;speed & release select 
+sector_adr  ds  4       ;sector address converted (byte or lba)
+lba_adr     ds  4       ;sector address lba
+sector_mode ds  1       ;byte = 0, lba = $40
+timeout     ds  2       ;init timeout
+sm_init     ds  2       ;seed & modifier init
+seed        ds  1       ;test pattern seed & modifier
+modifier    ds  1
+toggle      ds  1
+dma_tab     ds  6       ;dma table for xcopy & SPI
+t_count     ds  4       ;# of 10ms ticks since last (re)start
+dma_trc_x   ds  1       ;pointer to next trace entry
+
+send_cmd_end
+            ds  1       ;temporary end of command message
+response    ds  5       ;r1 - r7 response from last command
+
+
+        org $300
+dma_trace   ds  256     ;last 256 dma stat
+read        ds  512     ;readback pattern
+pattern     ds  512     ;generated pattern
+
+              
+        code
+
+stop_debug   macro
+        db  $db         ;uses 65c02 stop instruction, exception trap on 6502
+        endm
+
+        org $1000
+
+start
+        sei
+        lda #0              ;reset 10ms count & trace
+        sta t_count
+        sta t_count+1
+        sta t_count+2
+        sta t_count+3
+        sta dma_trc_x
+        tax
+trc_clr    
+        sta dma_trace,x
+        inx
+        bne trc_clr
+        lda #1              ;allow 10ms tick
+        sta tim_flg
+        sta tim_msk
+        cli
+
+xmem_loop
+;        jsr xcopy_gen       ;test xcopy/xswap only
+;        jsr xcopy_swap
+;        jsr xcopy_read
+;        jmp xmem_loop
+
+        ;issue idle clocks
+        lda #spi_slo        ;250 kHz
+        sta spi_cmd
+        sta sd_stop
+        ora #$40
+        sta sd_start
+        ldx #32+10          ;32 = ~1ms + 10 = > 74 clocks
+        lda #$ff            ;MOSI = 1
+init_clk
+        sta spi_nss         ;SS = 1 for sd card
+        dex
+        bne init_clk
+        ;cmd0 - set idle state
+        ldy #10             ;10 retries
+init_reset
+        ldx #spi_cmd0x
+        jsr send_cmd
+        cmp #1              ;idle?
+        beq init_idle
+        dey
+        bne init_reset
+        beq *               ;failed to enter idle state - SD card plugged?
+init_idle
+        ;cmd8 - send if cond, only valid for SD V2
+        ldx #spi_cmd8x
+        jsr send_cmd
+        cmp #5              ;illegal command
+        beq init_v1         ;is <V2
+        cmp #1              ;any other errors?
+        bne *               ;could not determine card type
+        lda response+3      ;voltage
+        cmp #1              ;2.7V - 3.6V supported?
+        bne *               ;3.3V not supported
+        lda response+4      ;echo back
+        cmp #$aa            ;expected
+        bne *               ;not matched
+init_v1
+        lda #140            ;try at least for 1 second
+        sta timeout
+        sta timeout+1
+init_loop
+        ldx #spi_cmd55x     ;switch to application command
+        jsr send_cmd
+        cmp #1              ;remains idle?
+        bne *               ;unexpected response
+        ldx #spi_acmd41x     ;init card
+        jsr send_cmd
+        dec timeout
+        bne init_timer
+        dec timeout+1
+        beq *               ;no answer to acmd41 within >1s
+init_timer
+        cmp #1              ;still idle?
+        beq init_loop
+        cmp #0              ;no errors?
+        bne *               ;init failed, possible SDHC, SDXC 
+        ldx #spi_cmd58x     ;read ocr (capacity bit)
+        jsr send_cmd
+        bne *               ;any error
+        lda response+1      ;test capacity (block or byte address?)
+        and #$40
+        sta sector_mode
+        bne init_block      ;is LBA (>2GB)
+        ldx #spi_cmd16x     ;force sector size 512
+        jsr send_cmd
+        bne *               ;any error
+init_block
+        lda #0              ;set sector address
+        sta lba_adr
+        sta lba_adr+2
+        sta lba_adr+3
+        lda #$48            ;lba $4800
+        sta lba_adr+1
+       
+        lda #spi_ful        ;set SPI full speed
+        sta sd_stop
+        ora #$40
+        sta sd_start
+
+        jsr xcopy_gen
+        jsr xcopy_swap
+        
+        ldx #0              ;copy SPI write dma tab
+write_setup
+        lda dma_pbuf,x
+        sta dma_tab,x
+        inx
+        cpx #6
+        bne write_setup
+write_128k
+        jsr conv_lba
+        jsr write_cluster   ;write 32k pattern
+        inc dma_tab+1       ;next bank
+        lda lba_adr         ;next cluster
+        clc
+        adc #clus_size
+        sta lba_adr
+        bne write_128k
+
+read_repeat
+        ldx #0              ;copy SPI read dma tab
+read_setup
+        lda dma_rbuf,x
+        sta dma_tab,x
+        inx
+        cpx #6
+        bne read_setup
+read_128k
+        jsr conv_lba
+        jsr read_cluster    ;read 32k pattern
+        dec dma_tab+1       ;next bank
+        lda lba_adr         ;next cluster
+        clc
+        adc #clus_size
+        sta lba_adr
+        bne read_128k
+        
+        jsr xcopy_swap
+        jsr xcopy_read
+        
+        beq read_repeat     ;endless read
+
+; +++ end of main +++
+
+
+;subroutine to generate a pattern and copy to another bank
+xcopy_gen
+        jsr reset_seed
+        ldx #0              ;copy pattern generate dma tab
+xg_setup
+        lda dma_xgen,x
+        sta dma_tab,x
+        inx
+        cpx #5
+        bne xg_setup
+xg_loop
+        jsr gen_pattern
+        lda #9              ;set dma tab
+        sta dma_cmd
+        ldx #0
+xg_setdma
+        lda dma_tab,x
+        sta dma_dat
+        inx
+        cpx #5
+        bne xg_setdma
+        lda #$a             ;start copy
+        sta dma_cmd
+        lda dma_sta         ;get stat
+        cmp #$1a
+        bne *               ;copy failed
+        inc dma_tab+3       ;next 512 bytes
+        inc dma_tab+3
+        bpl xg_loop         ;for 32k
+        lda #0              ;next bank
+        sta dma_tab+3
+        inc dma_tab+2
+        lda dma_tab+2
+        cmp #6
+        bne xg_loop         ;for 4 banks (128k)
+        rts
+                
+;subroutine to swap lower with higher banks
+xcopy_swap
+        ldx #0              ;copy pattern read & verify dma tab
+xs_setup
+        lda dma_xswap,x
+        sta dma_tab,x
+        inx
+        cpx #5
+        bne xs_setup
+xs_loop
+        lda #9              ;set dma tab
+        sta dma_cmd
+        ldx #0
+xs_setdma
+        lda dma_tab,x
+        sta dma_dat
+        inx
+        cpx #5
+        bne xs_setdma
+        lda #$b             ;start swap
+        sta dma_cmd
+        lda dma_sta         ;get stat
+        cmp #$1b
+        bne *               ;copy failed
+        inc dma_tab
+        dec dma_tab+2
+        lda dma_tab
+        cmp #4
+        bne xs_loop         ;for 2 banks (swap first 64k with second 64k)
+        rts
+        
+;subroutine to copy from another bank and verify the pattern
+xcopy_read
+        jsr reset_seed
+        ldx #0              ;copy pattern read & verify dma tab
+xr_setup
+        lda dma_xread,x
+        sta dma_tab,x
+        inx
+        cpx #5
+        bne xr_setup
+xr_loop
+        jsr gen_pattern
+        lda #9              ;set dma tab
+        sta dma_cmd
+        ldx #0
+xr_setdma
+        lda dma_tab,x
+        sta dma_dat
+        inx
+        cpx #5
+        bne xr_setdma
+        lda #$a             ;start copy
+        sta dma_cmd
+        lda dma_sta         ;get stat
+        cmp #$1a
+        bne *               ;copy failed
+        jsr verify
+        inc dma_tab+1       ;next 512 bytes
+        inc dma_tab+1
+        bpl xr_loop         ;for 32k
+        lda #0              ;next bank
+        sta dma_tab+1
+        dec dma_tab
+        lda dma_tab
+        cmp #1
+        bne xr_loop         ;for 4 banks (128k)
+        rts
+
+;subroutine to verify pattern with read
+verify
+        ldx #0
+verify1 
+        lda pattern,x
+        cmp read,x
+        beq verify2
+        sei                 ;trap for miscompare
+        stop_debug
+        cli
+verify2
+        inx
+        bne verify1
+verify3 
+        lda pattern+256,x
+        cmp read+256,x
+        beq verify4
+        sei                 ;trap for miscompare
+        stop_debug
+        cli
+verify4
+        inx
+        bne verify3
+        rts
+
+;reset seed to repeat the pattern
+reset_seed
+        lda #0
+        sta toggle
+        lda sm_init
+        sta seed
+        lda sm_init+1
+        sta modifier
+        rts
+
+;generate test pattern from seed and modify next seed
+gen_pattern                 ;generate test pattern
+        lda toggle          ;seed or modifier
+        bmi gen_add_seed
+        dec toggle
+        clc
+        lda seed
+        adc #5
+        sta seed
+        jmp gen_add_end
+gen_add_seed
+        inc toggle
+        clc
+        lda modifier
+        adc #3
+        sta modifier
+gen_add_end
+        ldx #2
+        lda seed
+gen_test_pre                 
+        clc
+        adc modifier
+        dex
+        bpl gen_test_pre
+        ldx #0
+gen_test_pat
+        sta pattern,x
+        clc
+        adc modifier
+        inx
+        bne gen_test_pat
+gen_test_pat2
+        sta pattern+256,x
+        clc
+        adc modifier
+        inx
+        bne gen_test_pat2
+        rts
+
+init    inc sm_init         ;initialize seed & modifier
+        bne init
+        inc sm_init+1
+        jmp init            ;AP1000 to start test
+
+;subroutine to convert lba to sector address
+conv_lba
+        bit sector_mode     ;$40 if lba, 0 if byte
+        bvc cl_byte
+        ldx #0
+cl_lba_loop
+        lda lba_adr,x       ;just copy lba
+        sta sector_adr,x
+        inx
+        cpx #4
+        bne cl_lba_loop
+        rts        
+cl_byte                     ;byte address = lba * $200
+        lda lba_adr+3
+        bne *               ;lba overflow
+        bit lba_adr+2
+        bmi *               ;lba overflow
+        sta sector_adr
+        lda lba_adr
+        asl a
+        sta sector_adr+1
+        lda lba_adr+1
+        rol a
+        sta sector_adr+2
+        lda lba_adr+2
+        rol a
+        sta sector_adr+3
+        rts
+         
+;subroutine to read 32k cluster
+read_cluster
+        jsr start_read
+        ldy #clus_size
+rc_loop
+        jsr read_multi
+        dey
+        bne rc_loop
+        jmp end_read
+        
+;subroutine to write 32k cluster
+write_cluster
+        jsr start_write
+        ldy #clus_size      ;# sectors per cluster
+wc_loop
+        jsr write_multi
+        dey
+        bne wc_loop
+        jmp end_write
+
+;subroutine to read one sector
+read_one
+        ldx #$40+17         ;command: read 1 sector
+        jsr rw_cmd
+ro_wait
+        lda spi_sd          ;wait for data
+        cmp #$fe            ;start of data token
+        bne ro_wait
+      if use_dma = 0
+        ldx #0              ;read sector   
+ro_loop
+        lda spi_sd
+        sta read,x
+        inx
+        bne ro_loop
+ro_loop2
+        lda spi_sd
+        sta read+$100,x
+        inx
+        bne ro_loop2
+      else
+        lda #0              ;set dma parameters
+        sta dma_cmd
+        ldx #0
+ro_dma_parm
+        lda dma_rbuf,x
+        sta dma_dat
+        inx
+        cpx #5
+        bne ro_dma_parm
+        lda #3              ;read dma
+        sta dma_cmd
+        lda dma_sta         ;check for errors
+        cmp #$13
+        bne *
+      endif
+        lda spi_sd          ;discard CRC
+        lda spi_sd
+        lda sd_stop         ;end slave select hold
+        sta spi_cmd
+        lda spi_nss         ;8 dummy clocks
+        rts
+        
+;subroutine to read one of many sectors
+read_multi
+        lda spi_sd          ;wait for data
+        cmp #$fe            ;start of data token
+        bne read_multi
+        lda #3              ;read dma
+        sta dma_cmd
+        lda dma_sta         ;check for errors
+        cmp #$13
+        bne *
+        lda spi_sd          ;discard CRC
+        lda spi_sd
+        rts
+        
+;subroutine to write one sector
+write_one
+        ldx #$40+24         ;command: write 1 sector
+        jsr rw_cmd
+
+        lda #$ff            ;delay write by 1 byte
+        sta spi_sd
+        lda #$fe            ;start data token
+        sta spi_sd
+      if use_dma = 0
+        ldx #0              ;write sector   
+wo_loop
+        lda pattern,x
+        sta spi_sd
+        inx
+        bne wo_loop
+wo_loop2
+        lda pattern+$100,x
+        sta spi_sd
+        inx
+        bne wo_loop2
+      else
+        lda #0              ;set dma parameters
+        sta dma_cmd
+        ldx #0
+wo_dma_parm
+        lda dma_pbuf,x
+        sta dma_dat
+        inx
+        cpx #5
+        bne wo_dma_parm
+        lda #2              ;write dma
+        sta dma_cmd
+        lda dma_sta         ;check for errors
+        cmp #$12
+        bne *
+      endif
+wo_ready
+        lda spi_sd          ;data response?
+        cmp #$ff
+        beq wo_ready
+        and #$1f
+        cmp #$05            ;accepted?
+        bne *               ;write error       
+        lda sd_stop         ;end slave select hold
+        sta spi_cmd
+        lda spi_nss         ;8 dummy clocks
+        rts
+
+;subroutine to write one block of many
+write_multi
+        lda spi_sd          ;previous busy?
+        cmp #$ff
+        bne write_multi
+        lda #$fc            ;start data token
+        sta spi_sd
+        lda #2              ;write dma
+        sta dma_cmd
+        lda dma_sta         ;check for errors
+        cmp #$12
+        bne *
+wm_ready
+        lda spi_sd          ;data response?
+        cmp #$ff
+        beq wm_ready
+        and #$1f
+        cmp #$05            ;accepted?
+        bne *               ;write error
+        rts
+
+;subroutine to end writing a cluster
+end_write              
+        lda spi_sd          ;previous busy?
+        cmp #$ff
+        bne end_write
+        lda #$fd            ;stop data token
+        sta spi_sd
+        lda #$ff            ;dummy byte to allow busy response
+        sta spi_sd
+        ldx #spi_cmd12x
+        jsr send_cmd
+        bne *               ;stop transmission failed
+        rts
+
+;subroutine to start writing a cluster (32 sectors)
+start_write
+        lda sd_start        ;full speed and hold slave select
+        sta spi_cmd
+        lda #8              ;set dma parameters with bank
+        sta dma_cmd
+        ldx #0
+sw_dma_parm
+        lda dma_tab,x
+        sta dma_dat
+        inx
+        cpx #6
+        bne sw_dma_parm
+sw_busy
+        lda spi_sd          ;busy with previous command?
+        cmp #$ff
+        bne sw_busy
+        ldx #spi_cmd55x     ;switch to application command
+        jsr send_cmd
+        bne *               ;error
+        ldx #spi_acmd23x    ;set erase block = 16k cluster
+        jsr send_cmd
+        bne *               ;error
+        ldx #$40+25         ;command: write multiple sectors
+        bne rw_cmd
+
+;subroutine to start reading multiple sectors
+start_read
+        lda #8              ;set dma parameters
+        sta dma_cmd
+        ldx #0
+sr_dma_parm
+        lda dma_tab,x
+        sta dma_dat
+        inx
+        cpx #6
+        bne sr_dma_parm
+        ldx #$40+18         ;command: read multiple sectors
+
+;send read/write command in X
+;   waits for previous op to complete
+rw_cmd
+        lda sd_start        ;hold slave select
+        sta spi_cmd
+rw_busy
+        lda spi_sd          ;busy with previous command?
+        cmp #$ff
+        bne rw_busy
+        stx spi_sd          ;send command
+        ldx #3              ;send sector address (sector or byte)
+rw_adr
+        lda sector_adr,x
+        sta spi_sd
+        dex
+        bpl rw_adr
+        lda #1              ;dummy CRC - end command bit 0bxxxxxxx1
+        sta spi_sd
+rw_busy2
+        lda spi_sd          ;busy with this command?
+        cmp #$ff
+        beq rw_busy2
+        cmp #0              ;test r1
+        bne *               ;command failed
+        rts
+
+;subroutine to end reading multiple sectors
+end_read
+        ldx #spi_cmd12x
+
+;subroutine to send SPI command pointed to by x with spi params in a
+;           response 1st byte returned in a, a=$ff if ncr timeout
+;           first byte plus up to 4 more bytes in response
+send_cmd
+        lda sd_start        ;speed & hold select
+        sta spi_cmd       
+        txa
+        clc
+        adc #6
+        sta send_cmd_end
+send_cmd_busy
+        lda spi_sd          ;wait on busy
+        cmp #$ff
+        bne send_cmd_busy
+send_cmd_loop
+        lda spi_cmd0,x
+        sta spi_sd
+        inx
+        cpx send_cmd_end
+        bne send_cmd_loop
+        lda spi_cmd0,x      ;get number of response bytes
+        sta send_cmd_end
+        ldx #8              ;SD to respond within 8 bytes
+send_cmd_response
+        lda spi_sd          ;read response
+        dex
+        bmi *               ;ncr timeout?
+        cmp #$ff            ;busy?
+        beq send_cmd_response
+send_cmd_result
+        ldx #0              ;continue to receive response
+send_cmd_rloop
+        sta response,x
+        inx
+        cpx send_cmd_end    ;enough bytes for this command?
+        beq send_cmd_rdone
+        lda spi_sd
+        jmp send_cmd_rloop
+send_cmd_rdone
+        lda sd_stop         ;end slave select
+        sta spi_cmd
+        lda spi_nss         ;8 dummy clocks
+        lda response
+        rts
+
+;SPI commands  cmd, p4, p3, p2, p1, crc, # of response bytes
+;   cmd = 0b01xxxxxx - start of command
+;   crc = 0bxxxxxxx1 - end of command
+spi_cmd0    db  $40+0,0,0,0,0,$95,1     ;valid CRC!
+spi_cmd0x   equ spi_cmd0-spi_cmd0
+
+spi_cmd8    db  $40+8,0,0,1,$aa,$87,5   ;valid CRC!
+spi_cmd8x   equ spi_cmd8-spi_cmd0
+
+spi_cmd55   db  $40+55,0,0,0,0,1,1      ;application command follows
+spi_cmd55x  equ spi_cmd55-spi_cmd0
+
+spi_acmd41  db  $40+41,$40,0,0,0,1,1    ;may add high capacity bit
+spi_acmd41x equ spi_acmd41-spi_cmd0
+
+spi_cmd58   db  $40+58,0,0,0,0,1,5      ;read ocr
+spi_cmd58x  equ spi_cmd58-spi_cmd0
+
+spi_cmd16   db  $40+16,0,0,$2,0,1,1     ;force sector size 512
+spi_cmd16x  equ spi_cmd16-spi_cmd0
+
+spi_acmd23  db  $40+23,0,0,0,clus_size,1,1  ;set erase block size
+spi_acmd23x equ spi_acmd23-spi_cmd0
+
+spi_cmd12   db  $40+12,0,0,0,0,1,1      ;stop multi block read
+spi_cmd12x  equ spi_cmd12-spi_cmd0
+
+;DMA table init for SPI and extended memory copy/swap
+dma_pbuf    db  4           ;device #
+            db  2           ;bank
+            dw  0           ;RAM address
+            dw  512         ;byte count
+           
+dma_rbuf    db  4           ;device #
+            db  5           ;bank
+            dw  0           ;RAM address
+            dw  512         ;byte count
+           
+dma_xgen    db  0           ;source bank
+            db  hi(pattern) ;source page
+            db  2           ;destination bank
+            db  0           ;destination page
+            db  2           ;page count (512 bytes)
+           
+dma_xread   db  5           ;source bank
+            db  0           ;source page
+            db  0           ;destination bank
+            db  hi(read)    ;destination page
+            db  2           ;page count (512 bytes)
+           
+dma_xswap   db  2           ;bank A
+            db  0           ;page A
+            db  5           ;bank B
+            db  0           ;page B
+            db  128         ;page count (32 kB)
+            
+;10ms tick interrupt
+irq_t0
+        pha
+        txa
+        pha
+        lda tim_flg         ;clear all timer interrupts
+        sta tim_flg
+        ldx dma_trc_x       ;trace current dma command
+        lda dma_sta
+        sta dma_trace,x
+        inc dma_trc_x
+        inc t_count         ;count events since last (re)start
+        bne irq_rti
+        inc t_count+1
+        bne irq_rti
+        inc t_count+2
+        bne irq_rti
+        inc t_count+3
+irq_rti
+        pla
+        tax
+        pla
+        rti
+
+        org $fffc
+        dw  init        ;reset vector 
+        dw  irq_t0      ;IRQ vector
+        
+        end init
+        

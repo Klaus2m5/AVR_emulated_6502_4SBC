@@ -35,4 +35,17 @@ spi_eep equ spi_dat+3   ;25LC512 EEPROM
 dma_cmd equ iomap+$f7   ;dma command register, write only
 dma_sta equ iomap+$f7   ;dma status register, read only
 dma_dat equ iomap+$f8   ;dma data register, read/write
+; IO subprocessor (ATMega16)
+ios_    equ iomap+$70   ;base address of the IO subprocessor
+ios_r0  equ ios_        ;IO register @ ios_adr, read/write
+ios_r1  equ ios_+1      ;IO register @ ios_adr+1, read/write
+ios_r2  equ ios_+2      ;IO register @ ios_adr+2, read/write
+ios_adr equ ios_+3      ;IO register address, write only
+ios_vec equ ios_+3      ;IRQ vector register, read only
+ios_ar  equ ios_+4      ;alternate IO register @ ios_aad, read/write
+ios_aad equ ios_+5      ;alternate IO register address, write only
+ios_xdr equ ios_+5      ;unit data register without special function, read only
+ios_dr  equ ios_+6      ;unit data register with extra functions, read/write
+ios_cr  equ ios_+7      ;command register, write only
+ios_drx equ ios_+7      ;current unit data register index, read only
 

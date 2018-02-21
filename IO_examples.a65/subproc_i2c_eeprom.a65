@@ -1,0 +1,283 @@
+; Non IRQ I2C EEPROM test writing 64k test pattern once,
+; reading the pattern indefinitely.
+; INIT randomizes pattern, AP1000 to start test
+iomap   equ $bf00       ;I/O page (A15:8)
+; IO subprocessor (ATMega16)
+ios_    equ iomap+$70   ;base address of the IO subprocessor
+ios_r0  equ ios_        ;IO register @ ios_adr, read/write
+ios_r1  equ ios_+1      ;IO register @ ios_adr+1, read/write
+ios_r2  equ ios_+2      ;IO register @ ios_adr+2, read/write
+ios_adr equ ios_+3      ;IO register address, write only
+ios_vec equ ios_+3      ;IRQ vector register, read only
+ios_ar  equ ios_+4      ;alternate IO register @ ios_aad, read/write
+ios_aad equ ios_+5      ;alternate IO register address, write only
+ios_xdr equ ios_+5      ;unit data register without special function, read only
+ios_dr  equ ios_+6      ;unit data register with extra functions, read/write
+ios_cr  equ ios_+7      ;command register, write only
+ios_drx equ ios_+7      ;current unit data register index, read only
+
+eep_adr equ $a0         ;i2c eeprom slave address
+
+        nolist
+        include "m16def.i65"
+        list
+        
+        bss
+        org 0
+sm_init     ds  2       ;seed & modifier init
+cur_adr     ds  2       ;current address in EEPROM
+seed        ds  1       ;test pattern seed & modifier
+modifier    ds  1
+toggle      ds  1
+        org $200
+read        ds  128     ;readback pattern
+pattern     ds  128     ;generated pattern
+
+              
+        code
+
+        org $1000
+
+start   
+        lda #is_twcr    ;set address for TWCR
+        sta ios_aad
+        lda #is_twbr    ;set address for TWBR
+        sta ios_adr
+        lda #12         ;set 400kHz SCL
+        sta ios_r0
+        lda #is_twsr    ;set address for TWSR (TWDR=R2)
+        sta ios_adr
+        jsr reset_seed
+write128
+        jsr gen_pattern
+wrstop  lda ios_ar      ;wait TWCR:TWSTO = 0
+        and #$10
+        bne wrstop
+        lda #$a4        ;TWCR = TWINT TWSTA TWEN (Start)
+        sta ios_ar
+wrsta   bit ios_ar      ;wait TWCR:TWINT = 1 (op complete)
+        bpl wrsta
+        lda ios_r0
+        cmp #$08        ;TWSR = START transmitted?
+        bne *
+        lda #eep_adr    ;TWDR = eeprom write address
+        sta ios_r2
+        lda #$84        ;TWCR = TWINT TWEN (slave address)
+        sta ios_ar
+wradr   bit ios_ar      ;wait TWCR:TWINT = 1 (op complete)
+        bpl wradr
+        lda ios_r0
+        cmp #$20        ;TWSR = NACK? - stop and repeat
+        bne wrack
+        lda #$94        ;TWCR = TWINT TWSTO TWEN (Stop)
+        sta ios_ar
+        bne wrstop
+wrack   cmp #$18        ;TWSR = address acknowledge?
+        bne *
+        lda cur_adr+1
+        sta ios_r2
+        lda #$84        ;TWCR = TWINT TWEN (EEPROM address high)
+        sta ios_ar
+wradhi  bit ios_ar      ;wait TWCR:TWINT = 1 (op complete)
+        bpl wradhi
+        lda ios_r0
+        cmp #$28        ;TWSR = data acknowledge?
+        bne *        
+        lda cur_adr
+        sta ios_r2
+        lda #$84        ;TWCR = TWINT TWEN (EEPROM address low)
+        sta ios_ar
+wradlo  bit ios_ar      ;wait TWCR:TWINT = 1 (op complete)
+        bpl wradlo
+        lda ios_r0
+        cmp #$28        ;TWSR = data acknowledge?
+        bne *        
+        ldx #127
+write1
+        lda pattern,x   ;write pattern
+        sta ios_r2
+        lda #$84        ;TWCR = TWINT TWEN (data)
+        sta ios_ar
+wrdat   bit ios_ar      ;wait TWCR:TWINT = 1 (op complete)
+        bpl wrdat
+        lda ios_r0
+        cmp #$28        ;TWSR = data acknowledge?
+        bne *
+        dex
+        bpl write1
+        lda #$94        ;TWCR = TWINT TWSTO TWEN (Stop)
+        sta ios_ar
+        lda cur_adr     ;address = next 128
+        clc
+        adc #128        
+        sta cur_adr
+        bcc wr128
+        inc cur_adr+1
+        beq readall
+wr128   jmp write128
+readall
+        jsr reset_seed
+read128
+        jsr gen_pattern
+rdstop  lda ios_ar      ;wait TWCR:TWSTO = 0
+        and #$10
+        bne rdstop
+        lda #$a4        ;TWCR = TWINT TWSTA TWEN (Start)
+        sta ios_ar
+rdsta   bit ios_ar      ;wait TWCR:TWINT = 1 (op complete)
+        bpl rdsta
+        lda ios_r0
+        cmp #$08        ;TWSR = START transmitted?
+        bne *
+        lda #eep_adr    ;TWDR = eeprom write address
+        sta ios_r2
+        lda #$84        ;TWCR = TWINT TWEN (slave address)
+        sta ios_ar
+rdadr   bit ios_ar      ;wait TWCR:TWINT = 1 (op complete)
+        bpl rdadr
+        lda ios_r0
+        cmp #$20        ;TWSR = NACK? - stop and repeat
+        bne rdack
+        lda #$94        ;TWCR = TWINT TWSTO TWEN (Stop)
+        sta ios_ar
+        bne rdstop
+rdack   cmp #$18        ;TWSR = address acknowledge?
+        bne *
+        lda cur_adr+1
+        sta ios_r2
+        lda #$84        ;TWCR = TWINT TWEN (EEPROM address high)
+        sta ios_ar
+rdadhi  bit ios_ar      ;wait TWCR:TWINT = 1 (op complete)
+        bpl rdadhi
+        lda ios_r0
+        cmp #$28        ;TWSR = data acknowledge?
+        bne *        
+        lda cur_adr
+        sta ios_r2
+        lda #$84        ;TWCR = TWINT TWEN (EEPROM address low)
+        sta ios_ar
+rdadlo  bit ios_ar      ;wait TWCR:TWINT = 1 (op complete)
+        bpl rdadlo
+        lda ios_r0
+        cmp #$28        ;TWSR = data acknowledge?
+        bne *            
+        
+        lda #$a4        ;TWCR = TWINT TWSTA TWEN (Repeated Start)
+        sta ios_ar
+rdrsta  bit ios_ar      ;wait TWCR:TWINT = 1 (op complete)
+        bpl rdrsta
+        lda ios_r0
+        cmp #$10        ;TWSR = repeated START transmitted?
+        bne *
+        lda #eep_adr+1  ;TWDR = eeprom read address
+        sta ios_r2
+        lda #$84        ;TWCR = TWINT TWEN (slave address)
+        sta ios_ar
+rdradr  bit ios_ar      ;wait TWCR:TWINT = 1 (op complete)
+        bpl rdradr
+        lda ios_r0
+        cmp #$40        ;TWSR = read slave address acknowledge
+        bne *
+        ldx #127
+read1
+        lda #$c4        ;TWCR = TWINT TWEA TWEN (read data with ack)
+        sta ios_ar
+rdrdat  bit ios_ar      ;wait TWCR:TWINT = 1 (op complete)
+        bpl rdrdat
+        lda ios_r0
+        cmp #$50        ;TWSR = read data - acknowledge sent
+        bne *
+        lda ios_r2      ;read pattern
+        sta read,x
+        dex
+        bne read1
+        lda #$84        ;TWCR = TWINT TWEN (read last byte)
+        sta ios_ar
+rdrlast bit ios_ar      ;wait TWCR:TWINT = 1 (op complete)
+        bpl rdrlast
+        lda ios_r0
+        cmp #$58        ;TWSR = read data - no acknowledge sent
+        bne *
+        lda ios_r2      ;read pattern
+        sta read,x
+        lda #$94        ;TWCR = TWINT TWSTO TWEN (Stop)
+        sta ios_ar
+
+        ldx #127
+verify1 
+        lda pattern,x
+        cmp read,x
+        bne *           ;trap for miscompare
+        dex
+        bpl verify1
+        lda cur_adr     ;address = next 128
+        clc
+        adc #128
+        sta cur_adr
+        bcc rd128
+        inc cur_adr+1
+        beq rdall
+rd128   jmp read128
+rdall   jmp readall     ;loop indefinitely
+
+reset_seed
+        lda #0
+rs_seed sta cur_adr     ;reset seed & current address
+        sta cur_adr+1
+        sta toggle
+        lda sm_init
+        sta seed
+        lda sm_init+1
+        sta modifier
+        rts
+
+gen_pattern                 ;generate test pattern
+        lda toggle          ;seed or modifier
+        bmi gen_add_seed
+        dec toggle
+        clc
+        lda seed
+        adc #5
+        sta seed
+        jmp gen_add_end
+gen_add_seed
+        inc toggle
+        clc
+        lda modifier
+        adc #3
+        sta modifier
+gen_add_end
+        ldx #2
+        lda seed
+gen_test_pre                 
+        clc
+        adc modifier
+        dex
+        bpl gen_test_pre
+        ldx #127
+gen_test_pat
+        sta pattern,x
+        clc
+        adc modifier
+        dex
+        bpl gen_test_pat
+        rts
+
+init    inc sm_init     ;initialize seed & modifier
+        bne init
+        inc sm_init+1
+        jmp init        ;AP1000 to start test
+
+nmi_trap
+        jmp *           ;no NMI expected
+        
+irq_handler
+        jmp *           ;no IRQ expected
+
+        org $fffa       ;vectors
+        dw  nmi_trap
+        dw  init        ;restart on reset
+        dw  irq_handler
+        
+        end init
+       

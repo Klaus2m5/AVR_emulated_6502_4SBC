@@ -1,0 +1,122 @@
+iomap   equ $bf00       ;I/O page (A15:8)
+; IO subprocessor (ATMega16)
+ios_    equ iomap+$70   ;base address of the IO subprocessor
+ios_r0  equ ios_        ;IO register @ ios_adr, read/write
+ios_r1  equ ios_+1      ;IO register @ ios_adr+1, read/write
+ios_r2  equ ios_+2      ;IO register @ ios_adr+2, read/write
+ios_adr equ ios_+3      ;IO register address, write only
+ios_vec equ ios_+3      ;IRQ vector register, read only
+ios_ar  equ ios_+4      ;alternate IO register @ ios_aad, read/write
+ios_aad equ ios_+5      ;alternate IO register address, write only
+                        ;registers below apply to SPI, TWI & USART only
+ios_sr  equ ios_+5      ;status register for pending IRQ, read only
+ios_dr  equ ios_+6      ;data register for pending IRQ, read/write
+ios_xr  equ ios_+7      ;extra register for pending IRQ, see docs
+
+        nolist
+        include "m16def.i65"
+        list
+        
+        bss
+        org 0
+seed        ds  1
+modifier    ds  1
+        org $20
+pattern     ds  16
+            ds  3       ;diffusor space
+        org $40
+read        ds  16
+
+        code        
+        org $1000
+
+start
+        lda #is_ubrrl       ;init USART
+        sta ios_adr
+        lda #$19            ;38400 Baud
+        sta ios_r0
+        lda #is_ucsrb       ;ios_r2 = UDR
+        sta ios_adr
+        lda #(1<<is_rxen|1<<is_txen) ;enable USART
+        sta ios_r0
+        lda #0
+        sta seed
+        sta modifier
+        
+inc_test                    ;generate test pattern
+        ldx #2
+        lda seed
+inc_test_pre                 
+        clc
+        adc modifier
+        dex
+        bpl inc_test_pre
+        ldx #15
+inc_test_pat
+        sta pattern,x
+        clc
+        adc modifier
+        dex
+        bpl inc_test_pat
+        jsr verify
+        inc modifier
+        bne inc_test
+        inc seed
+        bne inc_test
+
+
+inc_xor                     ;generate pattern with inversion
+        ldx #2
+        lda seed
+inc_xor_pre                 
+        clc
+        adc modifier
+        dex
+        bpl inc_xor_pre
+        ldx #15
+inc_xor_pat
+        sta pattern,x
+        clc
+        adc modifier
+        dex
+        eor #$ff
+        sta pattern,x
+        eor #$ff
+        clc
+        adc modifier
+        dex
+        bpl inc_xor_pat
+        jsr verify
+        inc modifier
+        bne inc_xor
+        inc seed
+        bne inc_xor
+
+        jmp start        
+
+verify  ldx #15             ;sub write - read - verify
+wr_loop lda ios_r1          ;wait UDRE
+        and #(1<<is_udre)
+        beq wr_loop
+        lda pattern,x
+        sta ios_r2          ;transmit data register
+wait_rxc
+        lda ios_r1          ;wait RXC
+        and #(1<<is_rxc)
+        beq wait_rxc
+        lda ios_r2          ;receive data register
+        sta read,x
+        dex
+        bpl wr_loop
+
+        ldx #15             ;compare read to lastpat
+cp_loop lda pattern,x
+        cmp read,x
+        bne *
+        dex
+        bpl cp_loop
+        rts        
+        
+        end start
+        
+        

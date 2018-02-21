@@ -8,14 +8,14 @@
 ; the source code.
 ;
 ;*********************************************************************
-.set  config_version = 831
+.set  config_version = 840
 
 ;ATMega platform - ATMega16 or ATMega32
 ;  ATMega32 may be required due to flash size for configured features 
 .IFNDEF   SIGNATURE_000  ;not already defined per default device in Atmel Studio >4
    .NOLIST
-   .INCLUDE "m16def.inc"
-   ;.INCLUDE "m32def.inc"
+   ;.INCLUDE "m16def.inc"
+   .INCLUDE "m32def.inc"
    .LIST
 .ENDIF
 
@@ -53,7 +53,15 @@
 
 ;ROM load & write protect page boundary - RAM at this page and above is write protected
 ;adds 2 cycles (125ns) to instructions writing to memory (stores & modifying memory)
-;.equ rommap    = 0xc0      
+;.equ rommap    = 0xc0
+
+;decimal mode can be extended to provide a hardware compatible result with 
+;  invalid BCD operands.
+;.equ dec_mode_extended = 1      
+;adds AVR cycles to decimal instructions according to the following chart:
+;        ADC   SBC  ;  flags: N  Z  C  V    
+;  6502  8-12  2-3  ;         b  b  d  -     b=binary result, d=decimal result,
+;  65C02 8-10  0    ;         d  d  d  -     -=not changed
 
 ;**** IO ****
 ;internal IO access page (RS232, Timers, Latches) - disabled if undefined
@@ -69,23 +77,21 @@
 .equ phi2_ena  = 1
 
 ; enable NMI input on portd2, disabled if undefined
-;.ifndef irq_dis_real
-   .equ nmi_ena   = 1
-;.endif
+.equ nmi_ena   = 1
 
 ;**** IO select expansion registers ****
 ;define inactive values of IO-select pins on IO-select expansion registers
 ;defines the opposite value as strobe polarity for each IO select pin
 
-.equ  ios1_default = 0b10000001        ;IO select pin 1 expansion default
-;io select bits 10 = -74HC573 input latch
-;               11 = 74HC573 output latch
-;               12 = HD44780 compatible character LCD
-;               13 = 65xx IO
-;               14 = I2C connect (74hc4066)
-;               15 = XMEM select
-;               16 = SPI select
-;               17 = -IO reset
+.equ  ios1_default = 0b00000100        ;IO select pin 1 expansion default
+;io select bits 10 = I2C connect (74hc4066)
+;               11 = SPI select
+;               12 = MMU select
+;               13 = HD44780 compatible character LCD
+;               14 = IO subprocessor
+;               15 =
+;               16 =
+;               17 =
 
 .ifndef  phi2_ena       ;not available if phi2 uses cbus pin 7
    ;.equ  ios2_default = 0b00000000    ;IO select pin 2 expansion default
@@ -113,13 +119,16 @@
 
 ;**** IO select for builtin modules ****
 ; enable SPI module and define IO select signal for SPI, disabled if undefined
-.equ spi_sel   = 16     ;IO select register 1, pin 6
+.equ spi_sel   = 11     ;IO select register 1, pin 1
 
 ; enable I2C module and define IO select signal for I2C, disabled if undefined
-.equ i2c_sel   = 14     ;IO select register 1, pin 4
+.equ i2c_sel   = 10     ;IO select register 1, pin 0
 
 ; enable LCD module and define IO select signal for LCD, disabled if undefined
-.equ lcd_sel   = 12     ;IO select register 1, pin 2
+.equ lcd_sel   = 13     ;IO select register 1, pin 3
+
+; enable MMU module and define IO select signal for MMU, disabled if undefined
+.equ mmu_sel   = 12     ;IO select register 1, pin 2
 
 ; IO selects of the addon IO modules in part 2 of the configuration
 
@@ -128,25 +137,25 @@
 ;reset state, must be defined
 .equ spi_idle  = 0b11111   ;all slaves inactive
 ;.equ spi_idle  = 0xf       ;unused address for hardware translation
-;SS bit 0      = -SD card
-;SS bit 1      = -74HC165 parallel input shifter
-;SS bit 2      = -74HC595 parallel output shifter
-;SS bit 3      = -25LC512 SPI EEPROM 64kB
-;SS bit 4      = -unused
+;SS bit 0      = -unused
+;SS bit 1      = -unused
+;SS bit 2      = -unused
+;SS bit 3      = -unused
+;SS bit 4      = -SD card
 
 ;enable spi virtual address translation, disabled if undefined
 .equ spi_vat = 1           
 
 ;oplow BCD to SS pin table
 .macro   spi_virt_ss
-;  x0 = SD card on bit0 (-cs) & bit4 (+oe)
-;  x1 = 74HC165 on bit1 (-sh/+ld -oe)
+;  x0 -unused
+;  x1 -unused
    .db 0b00001^spi_idle,0b00010^spi_idle
-;  x2 = 74HC595 on bit2 (+rck)
-;  x3 = 25LC512 EEPROM on bit 3 (-cs)
-;   .db 0b00100^spi_idle,0b01000^spi_idle
-   .db 0b00100^spi_idle,spi_idle ;EEPROM masked
-;  x4 unused
+;  x2 -unused
+;  x3 -unused
+   .db 0b00100^spi_idle,0b01000^spi_idle
+;   .db 0b00100^spi_idle,spi_idle ;EMU EEPROM masked!
+;  x4 = SD card (-CS & -OE for MISO over 74HC125)
 ;  x5 inactive
    .db 0b10000^spi_idle,spi_idle
 ;  x6 inactive
@@ -157,19 +166,20 @@
 ;**** IO resets ****
 ;a reset pin can be defined and must reside on an IO-select expansion register
 ;this pin is strobed low during reset if defined
-.equ  io_reset_pin = 17
+;.equ  io_reset_pin = 17
 
 ;definition for io modules with a reset vector
 .macro   io_modules_reset 
-   rcall ltch_rs        ;reset 74HC573
+;   rcall ltch_rs        ;reset 74HC573
+   rcall iosub_rs       ;reset the IO subprocessor
 .endmacro
 
 ;**** miscelaneous ****
 ;64kB serial EEPROM reserved for non volatile program storage
 ;eep_adr >= 8 = I2C slave adr.; eep_adr < 8 = SPI device adr.
 ;none if undefined
-;.equ  eep_adr = 0xa0       ;I2C EEPROM
-.equ  eep_adr = 3          ;SPI EEPROM
+.equ  eep_adr = 0xa0       ;I2C EEPROM
+;.equ  eep_adr = 3          ;SPI EEPROM
 
 ; self diag register enable, allow force IRQ, NMI, RESET
 ; should stay undefined to prevent you from shooting yourself in the foot
@@ -199,15 +209,20 @@ ior_tab:
    rjmp  ir_exit     ;4x
    rjmp  ir_exit     ;5x
    rjmp  ir_exit     ;6x
-   rjmp  ir_exit     ;7x
+;   rjmp  ir_exit     ;7x
+   rjmp  iosub_rd    ;7x   IO subprocessor 1
    rjmp  ir_exit     ;8x
-   rjmp  spr_data    ;9x   SPI data register
-   rjmp  io65xx_rd   ;Ax   65xx IO chip RAM
-   rjmp  io65xx_rd   ;Bx   65xx IO chip
-   rjmp  ltch_rd     ;Cx   74HC573 latch(es)
+   rjmp  ir_exit     ;9x
+   rjmp  ir_exit     ;Ax
+   rjmp  mmu_rd      ;Bx   MMU bank select register
+   rjmp  spr_data    ;Cx   SPI data register
    rjmp  lcd_rd      ;Dx   character LCD
    rjmp  iorE0       ;Ex - subdecoded 0xe0 - 0xef
    rjmp  iordreg     ;Fx - internal emulated registers
+; optional modules replace rjmp ir_exit
+;   rjmp  io65xx_rd   ;8x   65xx IO chip RAM
+;   rjmp  io65xx_rd   ;9x   65xx IO chip
+;   rjmp  ltch_rd     ;Ax   74HC573 latch(es)
 
 ; write address table
 iow_tab:
@@ -218,15 +233,20 @@ iow_tab:
    rjmp  iw_exit     ;4x
    rjmp  iw_exit     ;5x
    rjmp  iw_exit     ;6x
-   rjmp  iw_exit     ;7x
+;   rjmp  iw_exit     ;7x   IO subprocessor 1
+   rjmp  iosub_wrt   ;7x
    rjmp  iw_exit     ;8x
-   rjmp  spw_data    ;9x   SPI data register
-   rjmp  io65xx_wrt  ;Ax   65xx IO chip (RAM)
-   rjmp  io65xx_wrt  ;Bx   65xx IO chip
-   rjmp  ltch_wrt    ;Cx   74HC573 latch(es)
+   rjmp  iw_exit     ;9x
+   rjmp  iw_exit     ;Ax
+   rjmp  mmu_wrt     ;Bx   MMU bank select register
+   rjmp  spw_data    ;Cx   SPI data register
    rjmp  lcd_wrt     ;Dx   character LCD
    rjmp  iowE0       ;Ex - subdecoded 0xe0 - 0xef
    rjmp  iowtreg     ;Fx - internal emulated registers
+; optional modules replace rjmp iw_exit
+;   rjmp  io65xx_wrt  ;8x   65xx IO chip (RAM)
+;   rjmp  io65xx_wrt  ;9x   65xx IO chip
+;   rjmp  ltch_wrt    ;Ax   74HC573 latch(es)
 
 ; sub address decode tables
 ; - select 1 from a range of 0x10 addresses
@@ -350,38 +370,56 @@ iowE0:                  ;write decode for 0xe0 - 0xef
 ;  multiple latches require individual IO-selects. these can be set by
 ;  software address decode or hardware decoder 74HC237 (up to 8 latches,
 ;  up to 4 each mixed r/w)
-
+/*
 ltch_rd:
-   set_io_select 10     ;read with strobe low io select extension reg 1, pin 0
+   set_io_select 30     ;read with strobe low io select extension reg 3, pin 0
    par_rd 100           ;min 60ns to data valid (3state output enable time OE - Q)
                         ;+ 1/2 clock (31.3ns) avr input latch delay
                    
 ltch_wrt:
-   set_io_select 11     ;write with strobe high io select extension reg 1, pin 1
+   set_io_select 31     ;write with strobe high io select extension reg 3, pin 1
    par_wrt 60           ;min 60ns enable strobe (propagation delay time LE - Q)
    rjmp  iw_exit        ;next instruction
 
 ltch_rs:
    clr   operand        ;clear 74hc573 output latch
-   set_io_reset 11      ;select latch strobe
+   set_io_reset 31      ;select latch strobe
    par_wrt 60           ;write operand with strobe
    ret                        
-
+*/
 ;*****************************************************************
 ;
 ;IO to 65xx chip using phi2
 ;
+
+/*
 io65xx_rd:
-   set_io_select 13     ;read with strobe on io select extension reg 1, pin 3
+   set_io_select 32     ;read with strobe on io select extension reg 3, pin 2
    phi2_rd              ;timed read synchronized to phi2 (OC2)
                    
 io65xx_wrt:
-   set_io_select 13     ;write with strobe on io select extension reg 1, pin 3
+   set_io_select 32     ;write with strobe on io select extension reg 3, pin 2
    phi2_wrt             ;timed write synchronized to phi2 (OC2)
+*/
 
 ;no software reset - hardware reset driven by reset pin
 
+;*****************************************************************
+;
+;IO to subprocessor
+;
+.set  iosub_adr = 0xbf70   ;identify this subprocessor by address
 
-;.org pc + 0x400         ;test sufficient space for custom modules
+iosub_rd:
+   set_io_select 14     ;read with strobe on io select extension reg 1, pin 4
+   nib_rd
+                   
+iosub_wrt:
+   set_io_select 14     ;write with strobe on io select extension reg 1, pin 4
+   nib_wrt
+
+iosub_rs:
+   set_io_select 14     ;reset the AVR IO subprocessor on IO select pin 14
+   nib_rs
 
 .endif

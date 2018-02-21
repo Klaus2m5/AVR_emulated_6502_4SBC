@@ -1,0 +1,303 @@
+;
+; IO subprocessor test: USART loopback with interrupts and concurrent OC2
+;
+iomap   equ $bf00       ;I/O page (A15:8)
+; IO subprocessor (ATMega16)
+ios_    equ iomap+$70   ;base address of the IO subprocessor
+ios_r0  equ ios_        ;IO register @ ios_adr, read/write
+ios_r1  equ ios_+1      ;IO register @ ios_adr+1, read/write
+ios_r2  equ ios_+2      ;IO register @ ios_adr+2, read/write
+ios_adr equ ios_+3      ;IO register address, write only
+ios_vec equ ios_+3      ;IRQ vector register, read only
+ios_ar  equ ios_+4      ;alternate IO register @ ios_aad, read/write
+ios_aad equ ios_+5      ;alternate IO register address, write only
+ios_xdr equ ios_+5      ;unit data register without special function, read only
+ios_dr  equ ios_+6      ;unit data register with extra functions, read/write
+ios_cr  equ ios_+7      ;command register, write only
+ios_drx equ ios_+7      ;current unit data register index, read only
+; trace timer 
+t1_adr  equ iomap+$f4   ;timer 1 register address, read/write
+t1_dat  equ iomap+$f5   ;timer 1 register data, read/write
+
+        nolist
+        include "m16def.i65"
+        list
+        
+;trace enable=1, disable=0
+trace = 0
+
+        bss
+        org 0
+seed        ds  1
+modifier    ds  1
+rxx         ds  1
+txx         ds  1
+traceptr    ds  2
+t2count     ds  1
+status      ds  1
+;diflimit    ds  1
+        org $20
+pattern     ds  16
+            ds  3       ;diffusor space
+        org $40
+read        ds  16
+
+        code        
+        org $1000
+
+start
+        if trace=1
+          lda #8              ;set t1_dat=tccr1
+          sta t1_adr
+          lda #2              ;clock /8, normal mode
+          sta t1_dat
+          lda #6              ;set t1_dat=tcnt1l
+          sta t1_adr
+          lda #0              ;trace starts at $2000
+          sta traceptr
+          lda #$20
+          sta traceptr+1           
+        else
+          lda #isc_t2         ;init T2 1ms
+          sta ios_cr
+          lda #$f9            ;ceiling 1ms @ 16MHz/64
+          sta ios_r0          ;ocr2
+          lda #(1<<is_wgm21|1<<is_cs22)
+          sta ios_r2          ;tccr2 = ctc, clk/64
+          lda #(1<<is_ocie2)
+          sta ios_dr          ;enable oc2 interrupt
+        endif
+        lda #isc_usart      ;init USART
+        sta ios_cr
+;        lda #$33            ;19200 Baud
+        lda #$19            ;38400 Baud
+        sta ios_r0          ;ubrrl
+                            ;enable USART with RXC interrupts
+        lda #(1<<is_rxen)|(1<<is_txen)|(1<<is_rxcie)
+        sta ios_r1          ;ucsrb         
+        lda #$ff            ;all USART interrupts invalid
+        sta rxx
+        sta txx
+;        lda #2              ;TX max 2 bytes ahead of RX
+;        sta diflimit
+        cli
+        lda #0
+        sta seed
+        sta modifier
+loop
+inc_test                    ;generate test pattern
+        ldx #2
+        lda seed
+inc_test_pre                 
+        clc
+        adc modifier
+        dex
+        bpl inc_test_pre
+        ldx #15
+inc_test_pat
+        sta pattern,x
+        clc
+        adc modifier
+        dex
+        bpl inc_test_pat
+        jsr verify
+        inc modifier
+        bne inc_test
+        inc seed
+        bne inc_test
+
+
+inc_xor                     ;generate pattern with inversion
+        ldx #2
+        lda seed
+inc_xor_pre                 
+        clc
+        adc modifier
+        dex
+        bpl inc_xor_pre
+        ldx #15
+inc_xor_pat
+        sta pattern,x
+        clc
+        adc modifier
+        dex
+        eor #$ff
+        sta pattern,x
+        eor #$ff
+        clc
+        adc modifier
+        dex
+        bpl inc_xor_pat
+        jsr verify
+        inc modifier
+        bne inc_xor
+        inc seed
+        bne inc_xor
+
+        jmp loop        
+
+verify  ldx #15             ;sub write - read - verify
+        stx rxx
+        stx txx
+        ;enable USART & interrupts
+;        lda #(1<<is_rxcie|1<<is_udrie|1<<is_rxen|1<<is_txen)
+;        sta ios_r1          ;ucsrb
+        isc_regbit 1,4      ;set ucsrb,udrie - allow udr empty interrupt
+wr_tx   lda txx             ;wait tx
+        bpl wr_tx
+wr_rx   lda rxx             ;wait rx
+        bpl wr_rx
+
+;        ldx #15      
+cp_loop lda pattern,x       ;compare read to lastpat
+        cmp read,x
+        bne *
+        dex
+        bpl cp_loop
+        rts        
+
+nmi_trap
+        jmp *           ;no NMI expected
+        
+irq_handler
+        pha
+        txa
+        pha
+        lda ios_vec
+        cmp #isv_urxc   ;USART receive complete?
+        beq irq_urxc
+        cmp #isv_udre   ;USART data register empty?
+        beq irq_udre
+        cmp #isv_oc2    ;T2 compare match
+        beq irq_oc2
+        bne *           ;unexpected IRQ vector
+irq_oc2 
+        bit ios_vec     ;end interrupt
+        inc t2count
+        pla
+        tax
+        pla
+        rti
+;irqtxmax
+;        inc diflimit    ;no byte sent
+irq_urxc
+;        inc diflimit    ;allow +1 byte tx
+        ldx rxx         ;load rx index
+        bmi *           ;unexpected rxc
+        lda ios_r2      ;load possible errors (ucsra)
+;        sta status
+        and #(1<<is_fe|1<<is_dor|1<<is_upe)
+        bne *           ;any rx error
+        lda ios_dr      ;load udr
+        sta read,x      ;buffer for compare
+        dex             ;update buffer index
+        stx rxx
+        if trace=1
+          ldy #3          ;trace
+;          lda status
+          sta (traceptr),y
+          dey
+          lda #2          ;mark ucrx interrupt
+          sta (traceptr),y
+          dey
+          lda t1_dat      ;timer is stored as big endian!!!
+          sta (traceptr),y
+          dey
+          lda t1_dat      ;timer is stored as big endian!!!
+          sta (traceptr),y
+          clc
+          lda traceptr
+          adc #4
+          sta traceptr
+          lda traceptr+1
+          adc #0
+          cmp #$30       ;trace wrap?
+          bcc urxc_wrap
+          lda #$20
+urxc_wrap
+          sta traceptr+1
+        endif
+        pla
+        tax
+        pla
+        rti
+irq_udre
+;        dec diflimit    ;limit tx bytes
+;        bmi irqtxmax
+        ldx txx         ;load tx index
+        bmi *           ;unexpected udre
+        bne irq_tx3     ;>0 = more bytes pending
+;        lda ios_r2      ;load possible errors (ucsra)
+;        sta status
+
+;        lda ios_r0
+;        and #$ff^(1<<is_udrie)
+;        sta ios_r0      ;stop udre interrupts
+        isc_regbit 0,4  ;clear ucsrb,udrie - stop udr empty interrupt
+irq_tx3 lda pattern,x   ;send pattern
+        sta ios_dr      ;udr
+        dex             ;update buffer index
+        stx txx
+        if trace=1
+          ldy #3          ;trace
+;          lda status
+          sta (traceptr),y
+          dey
+          lda #1          ;mark udre interrupt
+          sta (traceptr),y
+          dey
+          lda t1_dat      ;timer is stored as big endian!!!
+          sta (traceptr),y
+          dey
+          lda t1_dat      ;timer is stored as big endian!!!
+          sta (traceptr),y
+          clc
+          lda traceptr
+          adc #4
+          sta traceptr
+          lda traceptr+1
+          adc #0
+          cmp #$30       ;trace wrap?
+          bcc udre_wrap
+          lda #$20
+udre_wrap
+          sta traceptr+1
+        endif
+        pla
+        tax
+        pla
+        rti
+
+; take a subprocessor dump ->$200-$5ff
+; set PC to dump_ios and start
+dump_ios
+        sei
+        lda #is_sreg        ;override safety lock
+        sta ios_aad
+        lda #isc_diaga
+        sta ios_cr
+        ldx #0              ;from 0
+        stx ios_dr
+        stx ios_dr
+        lda #2              ;set buffer address $200
+        sta dump_ptr
+dump_loop
+        lda ios_dr
+dump_ptr = *+2
+        sta $200,x
+        inx                 ;for 256 bytes
+        bne dump_loop
+        inc dump_ptr
+        lda dump_ptr
+        cmp #6              ;4 * 256
+        bne dump_loop
+        db  $db             ;stop        
+        
+        org $fffa       ;vectors
+        dw  nmi_trap
+        dw  start       ;restart on reset
+        dw  irq_handler
+        
+        end start
+        
+        

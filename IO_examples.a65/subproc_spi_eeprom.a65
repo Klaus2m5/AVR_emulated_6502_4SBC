@@ -1,0 +1,248 @@
+; IO subprocessor SPI EEPROM test writing 64k bytes test pattern once,
+; reading the pattern indefinitely.
+; INIT randomizes pattern, AP1000 to start test
+iomap   equ $bf00       ;I/O page (A15:8)
+; IO subprocessor (ATMega16)
+ios_    equ iomap+$70   ;base address of the IO subprocessor
+ios_r0  equ ios_        ;IO register @ ios_adr, read/write
+ios_r1  equ ios_+1      ;IO register @ ios_adr+1, read/write
+ios_r2  equ ios_+2      ;IO register @ ios_adr+2, read/write
+ios_adr equ ios_+3      ;IO register address, write only
+ios_vec equ ios_+3      ;IRQ vector register, read only
+ios_ar  equ ios_+4      ;alternate IO register @ ios_aad, read/write
+ios_aad equ ios_+5      ;alternate IO register address, write only
+ios_xdr equ ios_+5      ;unit data register without special function, read only
+ios_dr  equ ios_+6      ;unit data register with extra functions, read/write
+ios_cr  equ ios_+7      ;command register, write only
+ios_drx equ ios_+7      ;current unit data register index, read only
+
+        nolist
+        include "m16def.i65"
+        list
+        
+        bss
+        org 0
+sm_init     ds  2       ;seed & modifier init
+cur_adr     ds  2       ;current address in EEPROM
+seed        ds  1       ;test pattern seed & modifier
+modifier    ds  1
+toggle      ds  1
+        org $200
+read        ds  128     ;readback pattern
+pattern     ds  128     ;generated pattern
+
+              
+        code
+
+wait_spi    macro       ;wait for spsr.spif = 1
+wspi\?
+        bit ios_r1      ;spsr
+        bpl wspi\?      ;loop on spif = 0      
+            endm
+
+        org $1000
+
+start
+        cli
+        lda #is_pinb    ;prepare spi port
+        sta ios_adr
+        lda #1          ;-cs high
+        sta ios_r2      ;portb
+        lda #%10110001  ;SCK, MOSI, SS, CS -> SPI EEPROM
+        sta ios_r1      ;ddrb
+        ;test cs is not stuck
+        lda ios_r0      ;test cs is low
+        and #1
+        beq *
+        isc_portbit 0,0,1,0 ;-cs = 0 (b.0 active)
+        lda ios_r0      ;test cs is high
+        and #1
+        bne *
+        isc_portbit 1,0,1,0 ;-cs = 1 (b.0 inactive)
+        lda ios_r0      ;test cs is low
+        and #1
+        beq *
+        lda #isc_spi    ;connect unit: SPI
+        sta ios_cr
+        lda #(1<<is_spe|1<<is_mstr)
+        sta ios_r0      ;spcr
+        jsr reset_seed
+write128
+        jsr gen_pattern
+        jsr eep_busy    ;wait for a page write to complete
+        isc_portbit 0,0,1,0 ;-cs = 0 (b.0 active)
+        lda #6          ;set write enable
+        sta ios_dr
+        wait_spi
+        isc_portbit 1,0,1,0 ;-cs = 1 (b.0 inactive)
+        isc_portbit 0,0,1,0 ;-cs = 0 (b.0 active)
+        lda #2          ;write command
+        sta ios_dr
+        lda cur_adr+1   ;send address high
+        wait_spi
+        sta ios_dr 
+        lda cur_adr     ;send address low
+        wait_spi
+        sta ios_dr 
+        ldx #127
+write1
+        lda pattern,x   ;write pattern
+        wait_spi
+        sta ios_dr 
+        dex
+        bpl write1
+        wait_spi
+        isc_portbit 1,0,1,0 ;-cs = 1 (b.0 inactive)
+        lda cur_adr     ;address = next 128
+        clc
+        adc #128        
+        sta cur_adr
+        bcc write128
+        inc cur_adr+1
+        bne write128
+        jsr eep_busy    ;wait for a page write to complete
+
+readall
+        jsr reset_seed
+read128
+        jsr gen_pattern
+        isc_portbit 0,0,1,0 ;-cs = 0 (b.0 active)
+        lda #3          ;read command
+        sta ios_dr 
+        lda cur_adr+1   ;write address high
+        wait_spi
+        sta ios_dr
+        lda cur_adr     ;write address low
+        wait_spi 
+        sta ios_dr
+        lda #0          ;dummy to clock 1st read
+        wait_spi
+        sta ios_dr
+        ldx #127
+read1
+        wait_spi
+        lda ios_dr      ;read previous & clock next
+        sta read,x
+        dex
+        bne read1
+        wait_spi 
+        lda ios_xdr     ;last byte - no clock
+        sta read
+        isc_portbit 1,0,1,0 ;-cs = 1 (b.0 inactive)
+        ldx #127
+verify1 
+        lda pattern,x
+        cmp read,x
+        bne *           ;trap for miscompare
+        dex
+        bpl verify1
+        lda cur_adr     ;address = next 128
+        clc
+        adc #128
+        sta cur_adr
+        bcc read128
+        inc cur_adr+1
+        bne read128
+        jmp readall     ;loop indefinitely
+
+eep_busy                ;wait for end of previous write
+        isc_portbit 0,0,1,0 ;-cs = 0 (b.0 active)
+        lda #5          ;read status
+        sta ios_dr
+        lda #0          ;dummy - clock read
+        wait_spi
+        sta ios_dr
+        wait_spi
+        isc_portbit 1,0,1,0 ;-cs = 1 (b.0 inactive)
+        lda ios_xdr     ;read status without clocking next byte
+        and #1          ;test busy
+        bne eep_busy
+        rts
+        
+reset_seed
+        lda #0
+rs_seed sta cur_adr     ;reset seed & current address
+        sta cur_adr+1
+        sta toggle
+        lda sm_init
+        sta seed
+        lda sm_init+1
+        sta modifier
+        rts
+
+gen_pattern                 ;generate test pattern
+        lda toggle          ;seed or modifier
+        bmi gen_add_seed
+        dec toggle
+        clc
+        lda seed
+        adc #5
+        sta seed
+        jmp gen_add_end
+gen_add_seed
+        inc toggle
+        clc
+        lda modifier
+        adc #3
+        sta modifier
+gen_add_end
+        ldx #2
+        lda seed
+gen_test_pre                 
+        clc
+        adc modifier
+        dex
+        bpl gen_test_pre
+        ldx #127
+gen_test_pat
+        sta pattern,x
+        clc
+        adc modifier
+        dex
+        bpl gen_test_pat
+        rts
+
+init    inc sm_init     ;initialize seed & modifier
+        bne init
+        inc sm_init+1
+        jmp init        ;AP1000 to start test
+
+nmi_trap
+        jmp *           ;no NMI expected
+        
+irq_handler
+        jmp *           ;no IRQ expected
+
+; take a subprocessor dump ->$400-$7ff
+; set PC to dump_ios and start
+dump_ios
+        sei
+        lda #is_sreg        ;override safety lock
+        sta ios_aad
+        lda #isc_diaga      ;start diag
+        sta ios_cr
+        ldx #0              ;address from 0
+        stx ios_dr
+        stx ios_dr
+        lda #4              ;set buffer address $400
+        sta dump_ptr
+dump_loop
+        lda ios_dr
+dump_ptr = *+2
+        sta $400,x
+        inx                 ;for 256 bytes
+        bne dump_loop
+        inc dump_ptr
+        lda dump_ptr
+        cmp #8              ;4 * 256
+        bne dump_loop
+        db  $db             ;stop        
+
+        org $fffa       ;vectors
+        dw  nmi_trap
+        dw  init        ;restart on reset
+        dw  irq_handler
+        
+        end init
+
+        

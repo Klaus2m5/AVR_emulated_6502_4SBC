@@ -1,0 +1,95 @@
+        bss
+        org 0
+seed        ds  1
+modifier    ds  1
+        org $20
+pattern     ds  16
+            ds  3       ;diffusor space
+        org $40
+read        ds  16
+
+        code        
+        org $1000
+
+start
+        lda #0
+        sta seed
+        sta modifier
+        
+inc_test                    ;generate test pattern
+        ldx #2
+        lda seed
+inc_test_pre                 
+        clc
+        adc modifier
+        dex
+        bpl inc_test_pre
+        ldx #15
+inc_test_pat
+        sta pattern,x
+        clc
+        adc modifier
+        dex
+        bpl inc_test_pat
+        jsr verify
+        inc modifier
+        bne inc_test
+        inc seed
+        bne inc_test
+
+
+inc_xor                     ;generate pattern with inversion
+        ldx #2
+        lda seed
+inc_xor_pre                 
+        clc
+        adc modifier
+        dex
+        bpl inc_xor_pre
+        ldx #15
+inc_xor_pat
+        sta pattern,x
+        clc
+        adc modifier
+        dex
+        eor #$ff
+        sta pattern,x
+        eor #$ff
+        clc
+        adc modifier
+        dex
+        bpl inc_xor_pat
+        jsr verify
+        inc modifier
+        bne inc_xor
+        inc seed
+        bne inc_xor
+
+        jmp start        
+
+verify  ldx #15             ;sub write - read - verify
+        lda #$6
+        sta $bf70           ;set address
+wt_loop lda pattern,x
+        sta $bf71           ;store in 6532 RAM
+        dex
+        bpl wt_loop
+
+        ldx #15
+        lda #$6
+        sta $bf70           ;set address
+rd_loop lda $bf71           ;readback
+        sta read,x
+        dex
+        bpl rd_loop
+
+        ldx #15             ;compare read to lastpat
+cp_loop lda pattern,x
+        cmp read,x
+        bne *
+        dex
+        bpl cp_loop
+        rts        
+        
+        end start
+        

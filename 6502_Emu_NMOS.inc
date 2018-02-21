@@ -3,7 +3,7 @@
 ;
 ;     N M O S   c o r e
 ;
-; Copyright (C) 2013-2014  Klaus Dormann
+; Copyright (C) 2013-2018  Klaus Dormann
 ;
 ; This program is free software: you can redistribute it and/or modify
 ; it under the terms of the GNU General Public License as published by
@@ -19,7 +19,7 @@
 ; along with this program.  If not, see <http://www.gnu.org/licenses/>.
 ;
 ;
-.set  core_version = 831
+.set  core_version = 840
 #define core_string "N6502" ;identify NMOS core in version message
 
 ;*****************************************************************
@@ -341,16 +341,16 @@ dis_opcode: .db   "BRK",op_s
 ;
 ; opcode fetch and decode, prefetch low operand
 .macro      op_decode
-            out   abuslo,pcl        ;opcode fetch
-            out   abushi,pch
+            out   abushi,pch        ;opcode fetch
+            out   abuslo,pcl
             sei                     ;allow emulation INT, NMI
             adiw  pch:pcl,1         ;pc -> op low
             cli
             wait_data_valid 4       ;240 minimum @ 16MHz
             in    opcode,dbusin
 
-            out   abuslo,pcl        ;operand address low prefetch
-            out   abushi,pch
+            out   abushi,pch        ;operand address low prefetch
+            out   abuslo,pcl
             wait_data_valid 6       ;360ns minimum @ 16MHz 
                   adiw  pch:pcl,1         ;pc -> op high
                   ijmp                    ;execute opcode
@@ -359,9 +359,9 @@ dis_opcode: .db   "BRK",op_s
 ;op decode after single, opcode already fetched
 .macro      op_decode_single
             sei                     ;allow emulation INT, NMI
-            out   abuslo,pcl        ;operand address low prefetch
+            out   abushi,pch        ;operand address low prefetch
+            out   abuslo,pcl
             cli
-            out   abushi,pch
             wait_data_valid 6       ;360ns minimum @ 16MHz 
                   adiw  pch:pcl,1         ;pc -> op high
                   ijmp                    ;execute opcode
@@ -382,8 +382,8 @@ no_branch:  op_decode
 ; address generate absolute
 .macro      adgen_a
             in    oplow,dbusin     
-            out   abuslo,pcl        ;operand high address fetch
-            out   abushi,pch
+            out   abushi,pch        ;operand high address fetch
+            out   abuslo,pcl
                   adiw  pch:pcl,1         ;pc -> next instruction
                   cbr   flags,(1<<op_ind) ;operand address is direct
             wait_data_valid 3       ;180ns minimum @ 16MHz
@@ -394,8 +394,8 @@ no_branch:  op_decode
 .macro      adgen_x     ;@0 = op_label xxx_
             .equ  @0x = pc
             in    oplow,dbusin     
-            out   abuslo,pcl        ;operand high address fetch
-            out   abushi,pch
+            out   abushi,pch        ;operand high address fetch
+            out   abuslo,pcl
                   adiw  pch:pcl,1         ;pc -> next instruction
                   cbr   flags,(1<<op_ind) ;operand address is direct
                   add   oplow,regx
@@ -409,8 +409,8 @@ no_branch:  op_decode
 .macro      adgen_y     ;@0 = op_label xxx_
             .equ  @0y = pc
             in    oplow,dbusin     
-            out   abuslo,pcl        ;operand high address fetch
-            out   abushi,pch
+            out   abushi,pch        ;operand high address fetch
+            out   abuslo,pcl
                   adiw  pch:pcl,1         ;pc -> next instruction
                   cbr   flags,(1<<op_ind) ;operand address is direct
                   add   oplow,regy
@@ -425,12 +425,10 @@ no_branch:  op_decode
             .equ  @0zxi = pc
             in    oplow,dbusin
             add   oplow,regx
-            out   abuslo,oplow      ;indirect low address fetch
-            out   abushi,zero
+            out   abushi,zero       ;indirect low address fetch
+            out   abuslo,oplow
                   inc   oplow
                   sbr   flags,(1<<op_ind)  ;operand address is indirect
-;                  brne  pc+2
-;                  rjmp  zp_wrap           ;exceeded end of zeropage
             wait_data_valid 2       ;120ns minimum @ 16MHz
             in    a,dbusin
             out   abuslo,oplow      ;indirect high address fetch
@@ -444,12 +442,10 @@ no_branch:  op_decode
 .macro      adgen_ziy     ;@0 = op_label xxx_
             .equ  @0ziy = pc
             in    oplow,dbusin
-            out   abuslo,oplow      ;indirect low address fetch
-            out   abushi,zero
+            out   abushi,zero       ;indirect low address fetch
+            out   abuslo,oplow
                   inc   oplow
                   sbr   flags,(1<<op_ind)  ;operand address is indirect
-;                  brne  pc+2
-;                  rjmp  zp_wrap           ;exceeded end of zeropage
             wait_data_valid 2       ;120ns minimum @ 16MHz
             in    a,dbusin
             out   abuslo,oplow      ;indirect high address fetch
@@ -466,8 +462,8 @@ no_branch:  op_decode
             .equ  @0zx = pc
             in    oplow,dbusin
             add   oplow,regx
-            out   abuslo,oplow      ;operand fetch
-            out   abushi,zero
+            out   abushi,zero       ;operand fetch
+            out   abuslo,oplow
             wait_data_valid 3       ;180ns minimum @ 16MHz
                clr   ophigh
                rjmp  @0m
@@ -478,8 +474,8 @@ no_branch:  op_decode
             .equ  @0zy = pc
             in    oplow,dbusin
             add   oplow,regy
-            out   abuslo,oplow      ;operand fetch
-            out   abushi,zero
+            out   abushi,zero       ;operand fetch
+            out   abuslo,oplow
             wait_data_valid 3       ;180ns minimum @ 16MHz
                clr   ophigh
                rjmp  @0m
@@ -489,8 +485,8 @@ no_branch:  op_decode
 .macro      adgen_z     ;@0 = op_label xxx_
             .equ  @0z = pc
             in    oplow,dbusin
-            out   abuslo,oplow      ;operand fetch
-            out   abushi,zero
+            out   abushi,zero       ;operand fetch
+            out   abuslo,oplow
             wait_data_valid 3       ;180ns minimum @ 16MHz
                clr   ophigh
                rjmp  @0m
@@ -498,8 +494,8 @@ no_branch:  op_decode
 
 ; operand fetch from memory 
 .macro      op_fetch
-            out   abuslo,oplow      ;operand fetch
-            out   abushi,ophigh
+            out   abushi,ophigh     ;operand fetch
+            out   abuslo,oplow 
          .ifdef iomap
             wait_data_valid 3       ;180ns minimum @ 16MHz
                   cpi   ophigh,iomap      ;internal io?
@@ -514,8 +510,8 @@ skip_IO:
 
 ; operand fetch from memory for modify op (extended memory address lock)
 .macro      op_fetch_modify
-            out   abuslo,oplow      ;operand fetch
-            out   abushi,ophigh
+            out   abushi,ophigh     ;operand fetch
+            out   abuslo,oplow 
          .ifdef iomap
             wait_data_valid 3       ;180ns minimum @ 16MHz
                   cpi   ophigh,iomap      ;internal io?
@@ -530,8 +526,8 @@ skip_IO:
 
 ; register fetch from memory 
 .macro      reg_fetch ;@0 = register
-            out   abuslo,oplow      ;register fetch
-            out   abushi,ophigh
+            out   abushi,ophigh     ;register fetch
+            out   abuslo,oplow 
          .ifdef iomap
             wait_data_valid 3       ;180ns minimum @ 16MHz
                   cpi   ophigh,iomap      ;internal io?
@@ -607,8 +603,8 @@ do_io:      rjmp  iowrite
             .equ  @0zx = pc
             in    oplow,dbusin
             add   oplow,regx
-            out   abuslo,oplow      ;operand fetch
-            out   abushi,zero
+            out   abushi,zero       ;operand fetch
+            out   abuslo,oplow
             rjmp  @0m
 .endmacro
 
@@ -617,8 +613,8 @@ do_io:      rjmp  iowrite
             .equ  @0zy = pc
             in    oplow,dbusin
             add   oplow,regy
-            out   abuslo,oplow      ;operand fetch
-            out   abushi,zero
+            out   abushi,zero       ;operand fetch
+            out   abuslo,oplow
             rjmp  @0m
 .endmacro
 
@@ -626,15 +622,15 @@ do_io:      rjmp  iowrite
 .macro      adgen_s_z     ;@0 = op_label xxx_
             .equ  @0z = pc
             in    oplow,dbusin
-            out   abuslo,oplow
             out   abushi,zero
+            out   abuslo,oplow
             rjmp  @0m
 .endmacro
 
 ; store register
 .macro      store_reg  ;@0 = register, @1 = zp_entry STx_m
-            out   abuslo,oplow 
             out   abushi,ophigh
+            out   abuslo,oplow 
          .ifdef iomap               ;test internal I/O
             cpi   ophigh,iomap
             breq  do_io
@@ -668,25 +664,9 @@ do_io:      mov   operand,@0
 ; ***** IRQ pin low interrupt *****
 ;
 IRQ:
-         .if defined(spi_sel) || defined(i2c_sel)
-            sbrs  flags,dma_rpt     ;NMI during dma transfer?
-            ifs   IRQ_dma
-               cbr   flags,(1<<dma_rpt)
-               sts   dma_tab+1,zl      ;save current dma memory address
-               sts   dma_tab+2,zh
-               sts   dma_tab+5,xl      ;save dma count in progress
-               sts   dma_tab+6,xh
-               cbr   flags,(1<<modify) ;unlock extended memory address after modify
-               out   dbusddr,zero      ;switch back to read mode
-               out   cbus,readmem      ;OE to RAM
-               ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
-               sbiw  pch:pcl,2         ;prepare for instruction retry
-               sbrs  flags,op_ind      ;3 byte instruction if direct
-            end   IRQ_dma
-         .endif
-            sbiw  pch:pcl,1         ;adjust PC (discard prefetch)
-            out   abuslo,allon      ;new PC high fetch from irq vector
-            out   abushi,allon
+            rupt_dma_mmu 1          ;handle DMA save & MMU restore
+            out   abushi,allon      ;new PC high fetch from irq vector
+            out   abuslo,allon
                   ldi   zl,0xfe     ;preload vector low  
                   ldi   a,IRQ_dis
                   out   ibus,a
@@ -709,8 +689,8 @@ IRQ:
             wait_data_valid 4       ;240ns minimum @ 16MHz
             in    oplow,dbusin
             
-            out   abuslo,spointer   ;push pch
-            out   abushi,one
+            out   abushi,one        ;push pch
+            out   abuslo,spointer
             dec   spointer
             out   cbus,writemem     ;WE, ~OE
             out   dbusout,pch       ;precharge write
@@ -742,26 +722,10 @@ IRQ:
 ; ***** NMI pin high to low edge interrupt *****
 ;
 NMI:
-         .if defined(spi_sel) || defined(i2c_sel)
-            sbrs  flags,dma_rpt     ;NMI during dma transfer?
-            ifs   NMI_dma
-               cbr   flags,(1<<dma_rpt)
-               sts   dma_tab+1,zl      ;save current dma memory address
-               sts   dma_tab+2,zh
-               sts   dma_tab+5,xl      ;save dma count in progress
-               sts   dma_tab+6,xh
-               cbr   flags,(1<<modify) ;unlock extended memory address after modify
-               out   dbusddr,zero      ;switch back to read mode
-               out   cbus,readmem      ;OE to RAM
-               ldi   oc_tabh,high(oc_tab) ;restore zh as opcode table
-               sbiw  pch:pcl,2         ;prepare for instruction retry
-               sbrs  flags,op_ind      ;3 byte instruction if direct
-            end   NMI_dma
-         .endif
-            sbiw  pch:pcl,1         ;adjust PC (discard prefetch)
+            rupt_dma_mmu 1          ;handle DMA save & MMU restore
             ldi   zl,0xfb           ;vector high first
-            out   abuslo,zl         ;new PC high fetch from irq vector
-            out   abushi,allon
+            out   abushi,allon      ;new PC high fetch from irq vector
+            out   abuslo,zl   
                   ldi   zl,0xfa     ;preload vector low  
                   ldi   a,IRQ_dis
                   out   ibus,a
@@ -784,8 +748,8 @@ NMI:
             wait_data_valid 4       ;240ns minimum @ 16MHz
             in    oplow,dbusin
             
-            out   abuslo,spointer   ;push pch
-            out   abushi,one
+            out   abushi,one        ;push pch
+            out   abuslo,spointer
             dec   spointer
             out   cbus,writemem     ;WE, ~OE
             out   dbusout,pch       ;precharge write
@@ -859,6 +823,7 @@ CLC_s:      in    opcode,dbusin     ;next opcode
 CLD_s:      in    opcode,dbusin     ;next opcode
 
             cbr   stat2,0b1000      ;AVR emulated OP
+            ldi   oc_tabh,high(oc_tab) 
 
             op_decode_single        ;next instruction
 
@@ -938,8 +903,8 @@ NOP_s:      in    opcode,dbusin     ;next opcode
 ; opcode:         PHA
 PHA_s:      in    opcode,dbusin     ;next opcode
 
-            out   abuslo,spointer   ;load address from SP
-            out   abushi,one
+            out   abushi,one        ;load address from SP
+            out   abuslo,spointer
             dec   spointer
             out   cbus,writemem     ;WE, ~OE
             out   dbusout,rega      ;precharge write
@@ -960,8 +925,8 @@ PHP_s:      in    opcode,dbusin     ;next opcode
             or    a,stat2           ;-V1BDI--
             ori   a,0b110000        ;  ^^=1 (pushed by software)
 
-            out   abuslo,spointer   ;load address from SP
-            out   abushi,one
+            out   abushi,one        ;load address from SP
+            out   abuslo,spointer
             dec   spointer
             out   cbus,writemem     ;WE, ~OE
             out   dbusout,a         ;precharge write
@@ -976,20 +941,20 @@ PHP_s:      in    opcode,dbusin     ;next opcode
 PLA_s:      in    opcode,dbusin     ;next opcode
 
             inc   spointer          
-            out   abuslo,spointer   ;load address from SP
-            out   abushi,one
+            out   abushi,one        ;load address from SP
+            out   abuslo,spointer
             wait_data_valid 0       ;0ns minimum @ 16MHz
             in    rega,dbusin
             flags_gen_nz rega
 
             op_decode_single        ;next instruction
 
-; opcode:         PLP
+; opcode:         binary PLP
 PLP_s:      in    opcode,dbusin     ;next opcode
 
             inc   spointer          
-            out   abuslo,spointer   ;load address from SP
-            out   abushi,one
+            out   abushi,one        ;load address from SP
+            out   abuslo,spointer
             wait_data_valid 0       ;0ns minimum @ 16MHz
             in    stat2,dbusin
 
@@ -1002,6 +967,31 @@ PLP_s:      in    opcode,dbusin     ;next opcode
 
             andi  stat2,0b1101100   ;-V1BDI-- (Break cleared)
             ori   stat2,0b0100000   ;  ^=1 (set unused)
+            sbrc  stat2,3           ;test decimal flag
+               ldi   oc_tabh,high(oc_tabd) 
+
+            op_decode_single        ;next instruction
+
+; opcode:         decimal PLP
+DPP_s:      in    opcode,dbusin     ;next opcode
+
+            inc   spointer          
+            out   abushi,one        ;load address from SP
+            out   abuslo,spointer
+            wait_data_valid 0       ;0ns minimum @ 16MHz
+            in    stat2,dbusin
+
+            IRQ_restore
+
+            mov   stat,stat2        ;restore AVR format
+            andi  stat,0b11         ;------ZC
+            bst   stat2,7           ;>---->
+            bld   stat,2            ;-----N--
+
+            andi  stat2,0b1101100   ;-V1BDI-- (Break cleared)
+            ori   stat2,0b0100000   ;  ^=1 (set unused)
+            sbrs  stat2,3           ;test decimal flag
+               ldi   oc_tabh,high(oc_tab) 
 
             op_decode_single        ;next instruction
 
@@ -1034,6 +1024,7 @@ SEC_s:      in    opcode,dbusin     ;next opcode
 SED_s:      in    opcode,dbusin     ;next opcode
 
             sbr   stat2,0b1000      ;AVR emulated OP
+            ldi   oc_tabh,high(oc_tabd)
 
             op_decode_single        ;next instruction
 
@@ -1140,20 +1131,20 @@ BVS_r:      sbrs  stat2,6
 
 ; opcode:         JMP
 JMP_i:      in    oplow,dbusin      ;save low pointer to pc     
-            out   abuslo,pcl        ;fetch high pointer to pc
-            out   abushi,pch
+            out   abushi,pch        ;fetch high pointer to pc
+            out   abuslo,pcl
                   mov   pcl,oplow
             wait_data_valid 1       ;60ns minimum @ 16MHz
             in    pch,dbusin        ;point to new pc
 
-            out   abuslo,pcl        ;fetch pc low  
-            out   abushi,pch
+            out   abushi,pch        ;fetch pc low  
+            out   abuslo,pcl
                   adiw  pch:pcl,1
             wait_data_valid 2       ;120ns minimum @ 16MHz
 
 JMP_a:      in    oplow,dbusin      ;save pc low   
-            out   abuslo,pcl        ;fetch pc high
-            out   abushi,pch
+            out   abushi,pch        ;fetch pc high
+            out   abuslo,pcl
                   mov   pcl,oplow
             wait_data_valid 1       ;60ns minimum @ 16MHz
             in    pch,dbusin        ;load new pc
@@ -1162,14 +1153,14 @@ JMP_a:      in    oplow,dbusin      ;save pc low
 
 ; opcode:         JSR
 JSR_a:      in    oplow,dbusin      ;save new PC as operand address
-            out   abuslo,pcl        ;new PC high fetch
-            out   abushi,pch
+            out   abushi,pch        ;new PC high fetch
+            out   abuslo,pcl
                                     ;pc++ skipped
             wait_data_valid 0       ;0ns minimum @ 16MHz
             in    ophigh,dbusin
             
-            out   abuslo,spointer   ;push pch
-            out   abushi,one
+            out   abushi,one        ;push pch
+            out   abuslo,spointer
             dec   spointer
             out   cbus,writemem     ;WE, ~OE
             out   dbusout,pch       ;precharge write
@@ -1190,8 +1181,8 @@ JSR_a:      in    oplow,dbusin      ;save new PC as operand address
 
 ; opcode:         RTS
 RTS_s:      inc   spointer          
-            out   abuslo,spointer   ;pull pcl
-            out   abushi,one
+            out   abushi,one        ;pull pcl
+            out   abuslo,spointer
                   inc   spointer          
             wait_data_valid 1       ;60ns minimum @ 16MHz
             in    pcl,dbusin
@@ -1202,10 +1193,10 @@ RTS_s:      inc   spointer
 
             op_decode               ;next instruction
 
-; opcode:         RTI
+; opcode:         binary RTI
 RTI_s:      inc   spointer          
-            out   abuslo,spointer   ;pull status
-            out   abushi,one
+            out   abushi,one        ;pull status
+            out   abuslo,spointer
                   inc   spointer
             wait_data_valid 1       ;60ns minimum @ 16MHz
             in    stat2,dbusin
@@ -1223,15 +1214,45 @@ RTI_s:      inc   spointer
                   bld   stat,2            ;-----N--
                   andi  stat2,0b1101100   ;-V1BDI-- (Break cleared)
                   ori   stat2,0b0100000   ;  ^=1 (set unused)
-            wait_data_valid 5       ;300ns minimum @ 16MHz
+                  sbrc  stat2,3           ;test decimal flag
+                     ldi   oc_tabh,high(oc_tabd) 
+            wait_data_valid 7       ;420ns minimum @ 16MHz
+            in    pch,dbusin
+
+            op_decode               ;next instruction
+
+; opcode:         decimal RTI
+DRI_s:      inc   spointer          
+            out   abushi,one        ;pull status
+            out   abuslo,spointer
+                  inc   spointer
+            wait_data_valid 1       ;60ns minimum @ 16MHz
+            in    stat2,dbusin
+            out   abuslo,spointer   ;pull pcl
+                  inc   spointer          
+                  ;status restore while we are waiting for data
+                  IRQ_restore
+                  mov   stat,stat2        ;restore AVR format
+            wait_data_valid 6       ;360ns minimum @ 16MHz
+            in    pcl,dbusin
+            out   abuslo,spointer   ;pull pch
+                  ;status restore while we are waiting for data
+                  andi  stat,0b11         ;------ZC
+                  bst   stat2,7           ;>---->
+                  bld   stat,2            ;-----N--
+                  andi  stat2,0b1101100   ;-V1BDI-- (Break cleared)
+                  ori   stat2,0b0100000   ;  ^=1 (set unused)
+                  sbrs  stat2,3           ;test decimal flag
+                     ldi   oc_tabh,high(oc_tab) 
+            wait_data_valid 7       ;420ns minimum @ 16MHz
             in    pch,dbusin
 
             op_decode               ;next instruction
 
 ; opcode:         BRK
 BRK_s:           ;save new PC as operand address
-            out   abuslo,allon      ;new PC high fetch from irq vector
-            out   abushi,allon
+            out   abushi,allon      ;new PC high fetch from irq vector
+            out   abuslo,allon
                   ldi   zl,0xfe     ;preload vector low   
                   ldi   a,IRQ_dis
                   out   ibus,a
@@ -1255,8 +1276,8 @@ BRK_s:           ;save new PC as operand address
             wait_data_valid 5       ;300ns minimum @ 16MHz
             in    oplow,dbusin
             
-            out   abuslo,spointer   ;push pch
-            out   abushi,one
+            out   abushi,one        ;push pch
+            out   abuslo,spointer
             dec   spointer
             out   cbus,writemem     ;WE, ~OE
             out   dbusout,pch       ;precharge write
@@ -1287,7 +1308,7 @@ BRK_s:           ;save new PC as operand address
 ;
             align 8           ;align to page boundary
 
-oc_tab:     rjmp  BRK_s       ;0x00
+oc_tab:     rjmp  BRK_s       ;0x00 binary mode
             rjmp  ORA_zxi 
             rjmp  illegalop 
             rjmp  illegalop 
@@ -1543,6 +1564,263 @@ oc_tab:     rjmp  BRK_s       ;0x00
             rjmp  SBC_x 
             rjmp  INC_x 
             rjmp  illegalop 
+
+oc_tabd:    rjmp  BRK_s       ;0x00 decimal mode
+            rjmp  ORA_zxi 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  ORA_z 
+            rjmp  ASL_z 
+            rjmp  illegalop 
+            rjmp  PHP_s 
+            rjmp  ORA_m 
+            rjmp  ASL_s 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  ORA_a 
+            rjmp  ASL_a 
+            rjmp  illegalop 
+            rjmp  BPL_r       ;0x10
+            rjmp  ORA_ziy 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  ORA_zx 
+            rjmp  ASL_zx 
+            rjmp  illegalop 
+            rjmp  CLC_s 
+            rjmp  ORA_y 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  ORA_x 
+            rjmp  ASL_x 
+            rjmp  illegalop 
+            rjmp  JSR_a       ;0x20
+            rjmp  AND_zxi 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  BIT_z 
+            rjmp  AND_z 
+            rjmp  ROL_z 
+            rjmp  illegalop 
+            rjmp  DPP_s 
+            rjmp  AND_m 
+            rjmp  ROL_s 
+            rjmp  illegalop 
+            rjmp  BIT_a
+            rjmp  AND_a 
+            rjmp  ROL_a
+            rjmp  illegalop 
+            rjmp  BMI_r       ;0x30
+            rjmp  AND_ziy 
+            rjmp  illegalop
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  AND_zx 
+            rjmp  ROL_zx 
+            rjmp  illegalop 
+            rjmp  SEC_s
+            rjmp  AND_y
+            rjmp  illegalop
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  AND_x 
+            rjmp  ROL_x
+            rjmp  illegalop 
+            rjmp  DRI_s       ;0x40
+            rjmp  EOR_zxi 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  EOR_z 
+            rjmp  LSR_z 
+            rjmp  illegalop 
+            rjmp  PHA_s 
+            rjmp  EOR_m 
+            rjmp  LSR_s 
+            rjmp  illegalop 
+            rjmp  JMP_a
+            rjmp  EOR_a 
+            rjmp  LSR_a 
+            rjmp  illegalop 
+            rjmp  BVC_r       ;0x50
+            rjmp  EOR_ziy 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  EOR_zx 
+            rjmp  LSR_zx 
+            rjmp  illegalop 
+            rjmp  CLI_s 
+            rjmp  EOR_y 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  EOR_x 
+            rjmp  LSR_x 
+            rjmp  illegalop 
+            rjmp  RTS_s       ;0x60
+            rjmp  DAD_zxi 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  DAD_z 
+            rjmp  ROR_z 
+            rjmp  illegalop 
+            rjmp  PLA_s 
+            rjmp  DAD_m 
+            rjmp  ROR_s 
+            rjmp  illegalop 
+            rjmp  JMP_i 
+            rjmp  DAD_a 
+            rjmp  ROR_a 
+            rjmp  illegalop 
+            rjmp  BVS_r       ;0x70
+            rjmp  DAD_ziy 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  DAD_zx 
+            rjmp  ROR_zx 
+            rjmp  illegalop 
+            rjmp  SEI_s 
+            rjmp  DAD_y 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  DAD_x 
+            rjmp  ROR_x 
+            rjmp  illegalop 
+            rjmp  illegalop   ;0x80
+            rjmp  STA_zxi 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  STY_z 
+            rjmp  STA_z 
+            rjmp  STX_z 
+            rjmp  illegalop 
+            rjmp  DEY_s
+            rjmp  illegalop 
+            rjmp  TXA_s 
+            rjmp  illegalop 
+            rjmp  STY_a 
+            rjmp  STA_a 
+            rjmp  STX_a 
+            rjmp  illegalop 
+            rjmp  BCC_r       ;0x90
+            rjmp  STA_ziy 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  STY_zx 
+            rjmp  STA_zx 
+            rjmp  STX_zy 
+            rjmp  illegalop 
+            rjmp  TYA_s 
+            rjmp  STA_y 
+            rjmp  TXS_s 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  STA_x 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  LDY_m       ;0xa0
+            rjmp  LDA_zxi 
+            rjmp  LDX_m 
+            rjmp  illegalop 
+            rjmp  LDY_z 
+            rjmp  LDA_z 
+            rjmp  LDX_z 
+            rjmp  illegalop 
+            rjmp  TAY_s 
+            rjmp  LDA_m 
+            rjmp  TAX_s 
+            rjmp  illegalop 
+            rjmp  LDY_a
+            rjmp  LDA_a 
+            rjmp  LDX_a 
+            rjmp  illegalop 
+            rjmp  BCS_r       ;0xb0
+            rjmp  LDA_ziy 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  LDY_zx 
+            rjmp  LDA_zx 
+            rjmp  LDX_zy 
+            rjmp  illegalop 
+            rjmp  CLV_s 
+            rjmp  LDA_y 
+            rjmp  TSX_s 
+            rjmp  illegalop 
+            rjmp  LDY_x 
+            rjmp  LDA_x 
+            rjmp  LDX_y 
+            rjmp  illegalop 
+            rjmp  CPY_m       ;0xc0
+            rjmp  CMP_zxi 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  CPY_z 
+            rjmp  CMP_z 
+            rjmp  DEC_z 
+            rjmp  illegalop 
+            rjmp  INY_s 
+            rjmp  CMP_m 
+            rjmp  DEX_s 
+            rjmp  illegalop 
+            rjmp  CPY_a 
+            rjmp  CMP_a 
+            rjmp  DEC_a 
+            rjmp  illegalop 
+            rjmp  BNE_r       ;0xd0
+            rjmp  CMP_ziy 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  CMP_zx 
+            rjmp  DEC_zx 
+            rjmp  illegalop 
+            rjmp  CLD_s 
+            rjmp  CMP_y 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  CMP_x
+            rjmp  DEC_x 
+            rjmp  illegalop 
+            rjmp  CPX_m       ;0xe0
+            rjmp  DSB_zxi 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  CPX_z 
+            rjmp  DSB_z 
+            rjmp  INC_z 
+            rjmp  illegalop 
+            rjmp  INX_s 
+            rjmp  DSB_m 
+            rjmp  NOP_s 
+            rjmp  illegalop 
+            rjmp  CPX_a 
+            rjmp  DSB_a 
+            rjmp  INC_a 
+            rjmp  illegalop 
+            rjmp  BEQ_r       ;0xf0
+            rjmp  DSB_ziy 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  DSB_zx 
+            rjmp  INC_zx 
+            rjmp  illegalop 
+            rjmp  SED_s 
+            rjmp  DSB_y 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  illegalop 
+            rjmp  DSB_x 
+            rjmp  INC_x 
+            rjmp  illegalop 
 ;*****************************************************************
 ;
 ; Exceptions
@@ -1565,11 +1843,11 @@ illegalop:
 ;*****************************************************************
 ;
 ; Memory read instructions
-;     Load, arithmetic & logical
+;     Load, binary arithmetic & logical
 ;
 ;*****************************************************************
 
-; opcode:         ADC
+; opcode:         binary ADC
             adgen_x     ADC_        ;abs,X
             adgen_y     ADC_        ;abs,Y
             adgen_zxi   ADC_        ;(ZP,X) indexed indirect
@@ -1581,8 +1859,8 @@ ADC_a:      adgen_a                 ;absolute
 ADC_o:      op_fetch                ;common entry after address generate
 ADC_m:      in    operand,dbusin    ;immediate & operand prefetched (z, zx, zy)
 
-            sbrc  stat2,3           ;test decimal flag
-            rjmp  ADC_d
+;            sbrc  stat2,3           ;test decimal flag
+;            rjmp  ADC_d
             out   sreg,stat         ;get C
             adc   rega,operand      ;AVR emulated OP
             in    stat,sreg         ;save NZC
@@ -1591,16 +1869,16 @@ ADC_m:      in    operand,dbusin    ;immediate & operand prefetched (z, zx, zy)
 
 ADC_d3:     op_decode               ;next instruction
 
-ADC_d:      addi  rega,0x66         ;decimal correction
-            out   sreg,stat
-            adc   rega,operand
-            in    stat,sreg
-            brcs  ADC_d2            ;MSD
-            subi  rega,0x60
-            out   sreg,stat
-ADC_d2:     brhs  ADC_d3            ;LSD
-            subi  rega,0x06
-            rjmp  ADC_d3
+;ADC_d:      addi  rega,0x66         ;decimal correction
+;            out   sreg,stat
+;            adc   rega,operand
+;            in    stat,sreg
+;            brcs  ADC_d2            ;MSD
+;            subi  rega,0x60
+;            out   sreg,stat
+;ADC_d2:     brhs  ADC_d3            ;LSD
+;            subi  rega,0x06
+;            rjmp  ADC_d3
 
 ; opcode:         AND
             adgen_x     AND_        ;abs,X
@@ -1766,7 +2044,7 @@ ORA_m:      in    operand,dbusin    ;immediate & operand prefetched (z, zx, zy)
 
             op_decode               ;next instruction
 
-; opcode:         SBC
+; opcode:         binary SBC
 ; subtraction in a 6502 works with reversed carry, borrow = !carry
 ; the reason: a 6502 performs an add with complemented operand during subtract
             adgen_x     SBC_        ;abs,X
@@ -1787,14 +2065,14 @@ SBC_m:      in    operand,dbusin    ;immediate & operand prefetched (z, zx, zy)
             bst   stat,3            ;save V
             bld   stat2,6
 
-            sbrs  stat2,3           ;test decimal flag
-            rjmp  SBC_d             ;skip decimal mode correction
+;            sbrs  stat2,3           ;test decimal flag
+;            rjmp  SBC_d             ;skip decimal mode correction;
 
-            brcs  SBC_d2            ;MSD correction
-            subi  rega,0x60
-            out   sreg,stat
-SBC_d2:     brhs  SBC_d             ;LSD correction
-            subi  rega,0x06
+;            brcs  SBC_d2            ;MSD correction
+;            subi  rega,0x60
+;            out   sreg,stat
+;SBC_d2:     brhs  SBC_d             ;LSD correction
+;            subi  rega,0x06
 
 SBC_d:      op_decode               ;next instruction
 
@@ -1926,3 +2204,89 @@ STY_a:      adgen_a                 ;absolute
 
 STY_o:      store_reg regy,STY_m    ;common entry after address generate
 
+;*****************************************************************
+;
+; Memory read instructions
+;     decimal arithmetic
+;
+;*****************************************************************
+
+; opcode:         decimal ADC
+            adgen_x     DAD_        ;abs,X
+            adgen_y     DAD_        ;abs,Y
+            adgen_zxi   DAD_        ;(ZP,X) indexed indirect
+            adgen_ziy   DAD_        ;(ZP),Y indirect indexed
+            adgen_zx    DAD_        ;ZP,X
+            adgen_z     DAD_        ;ZP absolute
+DAD_a:      adgen_a                 ;absolute
+
+DAD_o:      op_fetch                ;common entry after address generate
+DAD_m:      in    operand,dbusin    ;immediate & operand prefetched (z, zx, zy)
+
+            .ifdef dec_mode_extended
+               ldi   a,0x66            ;prepare to revoke decimal correction
+               out   sreg,stat
+               adc   rega,operand      ;perform binary add carry
+               in    stat,sreg         ;save binary NZ
+               brhc  DAD_d1
+                  cbr   a,6               ;decimal correction valid for halfcarry
+DAD_d1:        brcc  DAD_d2
+                  cbr   a,0x60            ;decimal correction valid for carry
+DAD_d2:        addi  rega,6            ;any low nibble BCD overflow?
+               brcs  DAD_d5            ;carry reversed!
+                  cbr   a,0x60            ;decimal correction valid for carry
+                  sbr   stat,1            ;set carry in saved status
+DAD_d5:        brhs  DAD_d3            ;halfcarry reversed!
+                  sbrs  a,1               ;no previous halfcarry?
+                     subi  rega,0x10         ;remove 1 halfcarry from result
+                  cbr   a,6               ;decimal correction valid for halfcarry
+DAD_d3:        addi  rega,0x60         ;any high nibble BCD overflow?
+               brcs  DAD_d4            ;carry reversed!
+                  cbr   a,0x60            ;decimal correction valid for carry
+                  sbr   stat,1            ;set carry in saved status
+DAD_d4:        sub   rega,a            ;revoke decimal correction if needed & set NZ
+            .else
+               addi  rega,0x66         ;decimal correction
+               out   sreg,stat
+               adc   rega,operand
+               in    stat,sreg
+               brcs  DAD_d2            ;MSD
+               subi  rega,0x60
+               out   sreg,stat
+DAD_d2:        brhs  DAD_d3            ;LSD
+               subi  rega,0x06
+DAD_d3:
+            .endif
+
+            op_decode               ;next instruction
+
+; opcode:         decimal SBC
+; subtraction in a 6502 works with reversed carry, borrow = !carry
+; the reason: a 6502 performs an add with complemented operand during subtract
+            adgen_x     DSB_        ;abs,X
+            adgen_y     DSB_        ;abs,Y
+            adgen_zxi   DSB_        ;(ZP,X) indexed indirect
+            adgen_ziy   DSB_        ;(ZP),Y indirect indexed
+            adgen_zx    DSB_        ;ZP,X
+            adgen_z     DSB_        ;ZP absolute
+DSB_a:      adgen_a                 ;absolute
+
+DSB_o:      op_fetch                ;common entry after address generate
+DSB_m:      in    operand,dbusin    ;immediate & operand prefetched (z, zx, zy)
+
+            com   operand
+            out   sreg,stat         ;get C
+            adc   rega,operand      ;AVR emulated OP
+            in    stat,sreg         ;save NZC
+            brcs  DSB_d2            ;MSD correction
+               subi  rega,0x60   
+               out   sreg,stat         ;restore halfcarry
+DSB_d2:     brhs  DSB_d3            ;LSD correction
+               subi  rega,0x06
+               .ifdef dec_mode_extended
+                  brhc  DSB_d3
+                  sbrs  stat,5            ;no double borrow?
+                     addi  rega,0x10         ;remove 1 borrow
+               .endif
+
+DSB_d3:     op_decode               ;next instruction

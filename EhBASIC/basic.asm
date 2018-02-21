@@ -7100,7 +7100,7 @@ LAB_HEXS
 
 	BNE	GoPr1			; else go make output string (branch always)
 
-; convert A to ASCII hex byte and output .. note set decimal mode before calling
+; convert A to ASCII hex byte and output
 
 LAB_A2HX
 	TAX				; save byte

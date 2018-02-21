@@ -1,0 +1,112 @@
+;
+; Jiffy timer with interrupt
+;
+iomap   equ $bf00       ;I/O page (A15:8)
+; IO subprocessor (ATMega16)
+ios_    equ iomap+$70   ;base address of the IO subprocessor
+ios_r0  equ ios_        ;IO register @ ios_adr, read/write
+ios_r1  equ ios_+1      ;IO register @ ios_adr+1, read/write
+ios_r2  equ ios_+2      ;IO register @ ios_adr+2, read/write
+ios_adr equ ios_+3      ;IO register address, write only
+ios_vec equ ios_+3      ;IRQ vector register, read only
+ios_ar  equ ios_+4      ;alternate IO register @ ios_aad, read/write
+ios_aad equ ios_+5      ;alternate IO register address, write only
+ios_xdr equ ios_+5      ;unit data register without special function, read only
+ios_dr  equ ios_+6      ;unit data register with extra functions, read/write
+ios_cr  equ ios_+7      ;command register, write only
+ios_drx equ ios_+7      ;current unit data register index, read only
+
+        nolist
+        include "m16def.i65"
+        list
+        
+        org 0
+eep_buf ds  2           ;eeprom buffer pointer
+eep_y   ds  1           ;index to eeprom write buffer
+        org $200
+text    db  "This is only a test",0
+eep_write
+        lda lo(text)    ;initialize buffer pointer
+        sta eep_buf
+        lda hi(text)
+        sta eep_buf+1
+        lda #0          ;index
+        sta eep_y
+        lda #12         ;connect eeprom and set eeprom address
+        sta ios_cr
+        lda #1          ;address = $100
+        sta ios_dr
+        lda #0
+        sta ios_dr      ;automatic connect to unit 11 (EEPROM data)
+        lda #(1<<is_eewe) ;wait for previous write to complete 
+eepw_wait
+        bit ios_ar      ;test eewe
+        bne eepw_wait
+        lda #(1<<is_eerie) ;enable EEPROM ready interrupt
+        sta ios_ar      ;actual write is done in irw_eep_write
+eepw_end
+        bit ios_ar      ;wait until irq handler clears eerie
+        bne eepw_end    ;  (last byte being written)
+        
+eep_read        
+        lda lo(readbuf) ;initialize buffer pointer
+        sta eep_buf
+        lda hi(readbuf)
+        sta eep_buf+1
+        ldy #-1         ;pre increment index
+        lda #12         ;connect eeprom address
+        sta ios_cr
+        lda #1          ;address = $100
+        sta ios_dr
+        lda #0
+        sta ios_dr      ;automatic connect to unit 11 (EEPROM data)
+        lda #(1<<is_eewe) ;wait for last previous write to complete 
+eepr_wait
+        bit ios_ar      ;test eewe
+        bne eepr_wait
+eepr_loop
+        iny
+        lda ios_dr      ;read EEPROM with automatic address increment
+        sta (eep_buf),y
+        bne eepr_loop   ;delimiter (0)?
+
+        jmp *           ;stop
+        
+readbuf ds  256         ;must reside in RAM        
+
+irq_dispatch            ;interrogate source of irq
+        pha             ;save accu
+        lda ios_vec     ;read vector, if <> 0 then subprocessor = vectored mode
+        beq irq_other
+        cmp #isv_erdy   ;EEPROM ready?
+        bne irq_unsol
+irq_eep_write
+        tya             ;save y
+        pha
+; if the eeprom is written from the main program instead you must wait for
+; the eewe bit to become 0
+;        lda #11         ;select EEPROM if not already selected
+;        sta ios_cr
+;        lda #(1<<is_eewe)
+;eep_wr_wait
+;        bit ios_ar      ;test eewe
+;        bne eep_wr_wait
+        ldy #eep_y
+        lda (eep_buf),y
+        bne irq_eep_cont ;buffer delimiter (0)?
+        sta ios_ar      ;clear eeprom ready interrupt enable (0->eerie)
+irq_eep_cont
+        sta ios_dr      ;write eep, increment address & exit vectored mode
+        inc eep_y       ;next write index
+        pla             ;restore registers
+        tay
+        pla
+        rti
+irq_other               ;add scan irq sources other than the subprocessor
+        pla
+        rti
+irq_unsol               ;unsolicited subprocessor irq - add error handler
+        jmp *           ;loop until reset
+
+        org $fffe       ;set global IRQ vector
+        dw  irq_dispatch        

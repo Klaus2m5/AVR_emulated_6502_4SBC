@@ -9,7 +9,7 @@
 
 ; 32k RAM mirrored = 12k EhBASIC code at top + 20k work space at bottom
 
-Ram_base		= $0300	; start of user RAM (set as needed, should be page aligned)
+Ram_base		= $0300	; start of user RAM (set as needed, must be page aligned)
 Ram_top		= $5000	; end of user RAM+1 (set as needed, should be page aligned)
 
 ; This start can be changed to suit your system
@@ -34,8 +34,7 @@ EMU_diag	= IO_PAGE+$c	; bit 7 = force debugger
 IR_mask	= IO_PAGE+$e	; interrupt enable mask
 
 ; now the code. all this does is set up the vectors and interrupt code
-; and wait for the user to select [C]old or [W]arm start. nothing else
-; fits in less than 256 bytes
+; and wait for the user to select [C]old or [W]arm start.
 
 	*=	$FE00		; pretend this is in a 1/2K ROM
 
@@ -58,12 +57,7 @@ LAB_stlp
 ; now do the signon message, Y = $00 here
 
 LAB_signon
-	LDA	LAB_mess,Y	; get byte from sign on message
-	BEQ	LAB_nokey	; exit loop if done
-
-	JSR	V_OUTP	; output character
-	INY			; increment index
-	BNE	LAB_signon	; loop, branch always
+	JSR	prt_msg	; Y=0 - print signon message
 
 LAB_nokey
 	JSR	V_INPT	; call scan input device
@@ -141,26 +135,6 @@ skip_esc_no
 LAB_nobyw
 	CLC			; flag no byte received
 	RTS
-
-; load a program from EEPROM by number
-
-load_eep
-	JSR	check_prognum
-	LDA	#7		; load command
-	STA	EEP_cmd
-	BIT	EEP_stat	; test for ack
-	CMP	#$ff
-	BNE	load_ok
-	JMP	LAB_GBYT	; continue
-load_ok
-	LDA	EEP_data	; set end_address
-	STA	Svarl
-	LDA	EEP_data
-	STA	Svarh
-	LDA	#<LAB_RMSG	; "READY"
-	LDY	#>LAB_RMSG
-	JSR	LAB_18C3
-	JMP	LAB_1319	; rebuild line pointers	
 		
 ; save a program to EEPROM by number
 
@@ -172,7 +146,63 @@ save_eep
 	STA	EEP_data
 	LDA	#6		; save command
 	STA	EEP_cmd
+	LDA	EEP_stat
+	CMP	#$16
+	BEQ	save_fail
 	JMP	LAB_GBYT	; continue 
+
+; load a program from EEPROM by number
+
+load_eep
+	JSR	check_prognum
+	LDA	#7		; load command
+	STA	EEP_cmd
+	LDA	EEP_stat	; test for ack
+	CMP	#$17		; load complete?
+	BNE	load_fail
+	LDA	EEP_data	; set end_address
+	STA	Svarl
+	LDA	EEP_data
+	STA	Svarh
+	LDA	#<LAB_RMSG	; "READY"
+	LDY	#>LAB_RMSG
+	JSR	LAB_18C3
+	JMP	LAB_1319	; rebuild line pointers	
+load_fail
+save_fail
+	CMP	#$ef		; program not found
+	BNE	load_ef
+	LDY	#msg_ef-msg_pool
+	JSR	prt_msg	
+	JMP	LAB_GBYT	; continue
+load_ef
+	CMP	#$ee		; EEPROM full
+	BNE	save_ee
+	LDY	#msg_ee-msg_pool
+	JSR	prt_msg	
+	JMP	LAB_GBYT	; continue
+save_ee	
+	CMP	#$ed		; EEPROM unaccessible
+	BNE	load_ed
+	LDY	#msg_ed-msg_pool
+	JSR	prt_msg	
+	JMP	LAB_GBYT	; continue
+load_ed	
+	CMP	#$ea		; program incompatible (Intel Hex)
+	BNE	load_ea
+	LDY	#msg_ea-msg_pool
+	JSR	prt_msg	
+	JMP	LAB_GBYT	; continue
+load_ea
+	CMP	#$e9		; program damaged
+	BNE	load_e9
+	LDY	#msg_e9-msg_pool
+	JSR	prt_msg	
+	JMP	LAB_1463	; perform NEW
+load_e9			; unspecified internal error
+	LDY	#msg_ff-msg_pool
+	JSR	prt_msg	
+	JMP	LAB_GBYT	; continue
 
 ; check program number for validity (0-0xfe)
 ; 0xff drops to debugger to allow EEPROM utility commands
@@ -204,6 +234,16 @@ prog_set_start
 	STA	EEP_data
 	RTS
 
+; print load/save errormessage
+
+prt_msg_loop
+	JSR	V_OUTP
+	INY
+prt_msg
+	LDA	msg_pool,y
+	BNE	prt_msg_loop
+	RTS
+	
 ; vector tables
 
 LAB_vec
@@ -247,9 +287,14 @@ NMI_CODE
 	PLA				; restore A
 	RTI
 
-LAB_mess
-	.byte	$0D,$0A,"6502 EhBASIC [C]old/[W]arm ?",$00
-					; sign on string
+msg_pool
+LAB_mess	.byte	$0D,$0A,"6502 EhBASIC [C]old/[W]arm ?",$00
+msg_ef	.byte	"program not found",0
+msg_ee	.byte	"EEPROM full",0
+msg_ed	.byte	"EEPROM unaccessible",0
+msg_ea	.byte	"program incompatible",0
+msg_e9	.byte	"program damaged",0
+msg_ff	.byte	"min_mon error",0
 
 ; system vectors
 

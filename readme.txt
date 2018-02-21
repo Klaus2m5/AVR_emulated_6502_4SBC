@@ -1,9 +1,13 @@
 Modular 6502 SBC with emulated CPU
 
-The minimum system consists of an ATMega16, an SRAM IC and some components to 
+The minimum system consists of an ATMega32, an SRAM IC and some components to 
 provide a clock source and an RS232 interface. A serial EEPROM can be added as
 non volatile program storage. Examples in the source code showcase, how 
 parallel IO can be added from simple latches to 65xx IO ICs.
+
+If you need a version for the ATMega16 go to the "low-flash" branch. The master
+branch now includes the optional IO subprocessor and the optional MMU with
+512k RAM.
 
 The emulation provides:
    some of the ATMega's internal IO capabilities

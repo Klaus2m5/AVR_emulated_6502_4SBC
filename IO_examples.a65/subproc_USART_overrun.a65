@@ -1,0 +1,103 @@
+;
+; IO subprocessor test: USART overrun resilliance
+;
+iomap   equ $bf00       ;I/O page (A15:8)
+; IO subprocessor (ATMega16)
+ios_    equ iomap+$70   ;base address of the IO subprocessor
+ios_r0  equ ios_        ;IO register @ ios_adr, read/write
+ios_r1  equ ios_+1      ;IO register @ ios_adr+1, read/write
+ios_r2  equ ios_+2      ;IO register @ ios_adr+2, read/write
+ios_adr equ ios_+3      ;IO register address, write only
+ios_vec equ ios_+3      ;IRQ vector register, read only
+ios_ar  equ ios_+4      ;alternate IO register @ ios_aad, read/write
+ios_aad equ ios_+5      ;alternate IO register address, write only
+ios_xdr equ ios_+5      ;unit data register without special function, read only
+ios_dr  equ ios_+6      ;unit data register with extra functions, read/write
+ios_cr  equ ios_+7      ;command register, write only
+ios_drx equ ios_+7      ;current unit data register index, read only
+
+        nolist
+        include "m16def.i65"
+        list
+        
+        bss
+        org 0
+send_cnt    ds  1
+rcv_cnt     ds  1
+
+        code        
+        org $1000
+
+start
+        lda #isc_usart      ;init USART
+        sta ios_cr
+        lda #$19            ;38400 Baud @ 16MHz
+        sta ios_r0          ;ubrrl
+        lda #(1<<is_rxen)|(1<<is_txen) ;enable USART
+        sta ios_r1          ;ucsrb         
+        lda #0
+        sta send_cnt
+        sta rcv_cnt
+        
+loop:
+        jsr send
+        jsr send
+        jsr send
+        jsr send
+        jsr receive
+        jsr receive
+        jsr receive
+        jsr receive
+        jmp loop
+
+send:
+        lda ios_r2          ;ucsra
+        and #(1<<is_udre)
+        beq send            ;wait udre = 1
+        ldx send_cnt
+        stx ios_dr          ;udr
+        inc send_cnt
+        rts
+        
+receive:
+        lda ios_r2          ;ucsra
+        bpl receive         ;wait rxc = 1
+        ldx ios_dr          ;udr
+        and #(1<<is_fe|1<<is_dor|1<<is_upe) ;check for errors
+        bne *
+        cpx rcv_cnt         ;check for dropped count/byte
+        bne *
+        inc rcv_cnt
+        rts        
+
+; take a subprocessor dump ->$200-$5ff
+; set PC to dump_ios and start
+dump_ios
+        sei
+        lda #is_sreg        ;override safety lock
+        sta ios_aad
+        lda #isc_diaga
+        sta ios_cr
+        ldx #0              ;from 0
+        stx ios_dr
+        stx ios_dr
+        lda #2              ;set buffer address $200
+        sta dump_ptr
+dump_loop
+        lda ios_dr
+dump_ptr = *+2
+        sta $200,x
+        inx                 ;for 256 bytes
+        bne dump_loop
+        inc dump_ptr
+        lda dump_ptr
+        cmp #6              ;4 * 256
+        bne dump_loop
+        db  $db             ;stop        
+
+        org $fffc       ;reset vector
+        dw  start       ;restart on reset
+
+        end start
+        
+        

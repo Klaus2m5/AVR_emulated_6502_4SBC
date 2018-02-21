@@ -1,0 +1,327 @@
+; Non IRQ I2C EEPROM test writing 64k test pattern once,
+; reading the pattern indefinitely.
+; INIT randomizes pattern, AP1000 to start test
+iomap   equ $bf00       ;I/O page (A15:8)
+; IO subprocessor (ATMega16)
+ios_    equ iomap+$70   ;base address of the IO subprocessor
+ios_r0  equ ios_        ;IO register @ ios_adr, read/write
+ios_r1  equ ios_+1      ;IO register @ ios_adr+1, read/write
+ios_r2  equ ios_+2      ;IO register @ ios_adr+2, read/write
+ios_adr equ ios_+3      ;IO register address, write only
+ios_vec equ ios_+3      ;IRQ vector register, read only
+ios_ar  equ ios_+4      ;alternate IO register @ ios_aad, read/write
+ios_aad equ ios_+5      ;alternate IO register address, write only
+ios_xdr equ ios_+5      ;unit data register without special function, read only
+ios_dr  equ ios_+6      ;unit data register with extra functions, read/write
+ios_cr  equ ios_+7      ;command register, write only
+ios_drx equ ios_+7      ;current unit data register index, read only
+
+eep_adr equ $a0
+
+        nolist
+        include "m16def.i65"
+        list
+        
+        bss
+        org 0
+sm_init     ds  2       ;seed & modifier init
+cur_adr     ds  2       ;current address in EEPROM
+seed        ds  1       ;test pattern seed & modifier
+modifier    ds  1
+toggle      ds  1
+        org $200
+read        ds  128     ;readback pattern
+pattern     ds  128     ;generated pattern
+
+              
+        code
+
+        org $1000
+
+start   
+        lda #isc_twi    ;connect unit: TWI
+        sta ios_cr
+        lda #12         ;set 400kHz SCL
+        sta ios_r0      ;twbr
+        lda #(1<<is_twen) ;enable TWI
+        sta ios_ar      ;twcr
+        jsr reset_seed
+write128
+        jsr gen_pattern
+;wait for previous stop operation to complete
+wrstop  lda ios_ar
+        and #(1<<is_twsto)
+        bne wrstop
+;start TWI
+        lda #(1<<is_twen)|(1<<is_twsta)|(1<<is_twint)
+        sta ios_ar      ;twcr
+wrstrt  bit ios_ar      ;test twcr.twint
+        bpl wrstrt
+        lda ios_r1      ;twsr
+        and #$f8        ;mask status
+        cmp #$08        ;start sent?
+        bne *
+;send slave address
+        lda #eep_adr    ;eeprom write address
+        sta ios_dr      ;twdr, clear twcr.twint
+wradr   bit ios_ar      ;test twcr.twint
+        bpl wradr
+        lda ios_r1      ;twsr
+        and #$f8        ;mask status
+        cmp #$20        ;slave busy with previous write page?
+        bne wradr1
+;slave busy retry, send stop
+        lda #(1<<is_twen)|(1<<is_twsto)|(1<<is_twint)
+        sta ios_ar      ;twcr
+        bne wrstop
+wradr1  cmp #$18        ;slave ack received?
+        bne *
+;send address to write
+        lda cur_adr+1   ;set eeprom address high
+        sta ios_dr      ;twdr, clear twcr.twint
+wrhi    bit ios_ar      ;test twcr.twint
+        bpl wrhi
+        lda ios_r1      ;twsr
+        and #$f8        ;mask status
+        cmp #$28        ;data ack received?
+        bne *
+        lda cur_adr     ;set eeprom address low
+        sta ios_dr      ;twdr, clear twcr.twint
+wrlo    bit ios_ar      ;test twcr.twint
+        bpl wrlo
+        lda ios_r1      ;twsr
+        and #$f8        ;mask status
+        cmp #$28        ;data ack received?
+        bne *
+;write data loop
+        ldx #127
+write1
+        lda pattern,x   ;write pattern
+        sta ios_dr      ;twdr, clear twcr.twint
+wrdat   bit ios_ar      ;test twcr.twint
+        bpl wrdat
+        lda ios_r1      ;twsr
+        and #$f8        ;mask status
+        cmp #$28        ;data ack received?
+        bne *
+        dex
+        bpl write1      ;inner loop
+;send stop, trigger page write
+        lda #(1<<is_twen)|(1<<is_twsto)|(1<<is_twint)
+        sta ios_ar      ;twcr
+;generate next address
+        lda cur_adr     ;address = next 128
+        clc
+        adc #128        
+        sta cur_adr
+        bcc write128x
+        inc cur_adr+1
+        beq readall
+write128x
+        jmp write128
+readall
+        jsr reset_seed
+read128
+        jsr gen_pattern
+;wait for previous stop operation to complete
+rdstop  lda ios_ar      ;wait for stop to complete
+        and #(1<<is_twsto)
+        bne rdstop
+;start TWI
+        lda #(1<<is_twen)|(1<<is_twsta)|(1<<is_twint)
+        sta ios_ar      ;twcr
+rdstrt  bit ios_ar      ;test twcr.twint
+        bpl rdstrt
+        lda ios_r1      ;twsr
+        and #$f8        ;mask status
+        cmp #$08        ;start sent?
+        bne *
+;send slave address
+        lda #eep_adr    ;eeprom write address
+        sta ios_dr      ;twdr, clear twcr.twint
+rdadr   bit ios_ar      ;test twcr.twint
+        bpl rdadr
+        lda ios_r1      ;twsr
+        and #$f8        ;mask status
+        cmp #$20        ;slave busy with previous write page?
+        bne rdadr1
+;slave busy retry, send stop
+        lda #(1<<is_twen)|(1<<is_twsto)|(1<<is_twint)
+        sta ios_ar      ;twcr
+        bne rdstop
+rdadr1  cmp #$18        ;slave ack received?
+        bne *
+;send address to write
+        lda cur_adr+1   ;set eeprom address high
+        sta ios_dr      ;twdr, clear twcr.twint
+rdhi    bit ios_ar      ;test twcr.twint
+        bpl rdhi
+        lda ios_r1      ;twsr
+        and #$f8        ;mask status
+        cmp #$28        ;data ack received?
+        bne *
+        lda cur_adr     ;set eeprom address low
+        sta ios_dr      ;twdr, clear twcr.twint
+rdlo    bit ios_ar      ;test twcr.twint
+        bpl rdlo
+        lda ios_r1      ;twsr
+        and #$f8        ;mask status
+        cmp #$28        ;data ack received?
+        bne *
+;restart TWI
+        lda #(1<<is_twen)|(1<<is_twsta)|(1<<is_twint)
+        sta ios_ar      ;twcr
+rdstrt2 bit ios_ar      ;test twcr.twint
+        bpl rdstrt2
+        lda ios_r1      ;twsr
+        and #$f8        ;mask status
+        cmp #$10        ;repeated start sent?
+        bne *
+;send slave address
+        lda #eep_adr+1  ;eeprom read address
+        sta ios_dr      ;twdr, clear twcr.twint
+rdadr2  bit ios_ar      ;test twcr.twint
+        bpl rdadr2
+        lda ios_r1      ;twsr
+        and #$f8        ;mask status
+        cmp #$40        ;slave read ack received?
+        bne *
+;read data loop
+;start first read with acknowledge
+        lda #(1<<is_twen)|(1<<is_twea)|(1<<is_twint)
+        sta ios_ar      ;twcr
+        ldx #127
+read1
+;read 1 byte when ready
+        bit ios_ar      ;test twcr.twint
+        bpl read1
+        lda ios_r1      ;twsr
+        and #$f8        ;mask status
+        cmp #$58        ;no ack sent?
+        beq read3       ;last byte       
+        cmp #$50        ;data byte received ($50 or $58)?
+        bne *
+        cpx #1          ;no ack prior to last read
+        beq read2       ;next to last byte
+        lda ios_dr      ;read pattern, clear twcr.twint
+        sta read,x
+        dex
+        bpl read1
+;next to last byte, send nak with last byte
+read2   lda ios_xdr     ;read without triggering twcr.twint (next read)
+        sta read+1
+        lda #(1<<is_twen)|(1<<is_twint) ;without ack
+        sta ios_ar      ;twcr
+        dex
+        bpl read1
+;last byte, send stop
+read3   lda ios_xdr     ;read without triggering twcr.twint (next read)
+        sta read
+        lda #(1<<is_twen)|(1<<is_twsto)|(1<<is_twint)
+        sta ios_ar      ;twcr
+
+;verify pattern        
+        ldx #127
+verify1 
+        lda pattern,x
+        cmp read,x
+        bne *           ;trap for miscompare
+        dex
+        bpl verify1
+        lda cur_adr     ;address = next 128
+        clc
+        adc #128
+        sta cur_adr
+        bcc rd128
+        inc cur_adr+1
+        beq rdall
+rd128   jmp read128
+rdall   jmp readall     ;loop indefinitely
+
+reset_seed
+        lda #0
+rs_seed sta cur_adr     ;reset seed & current address
+        sta cur_adr+1
+        sta toggle
+        lda sm_init
+        sta seed
+        lda sm_init+1
+        sta modifier
+        rts
+
+gen_pattern                 ;generate test pattern
+        lda toggle          ;seed or modifier
+        bmi gen_add_seed
+        dec toggle
+        clc
+        lda seed
+        adc #5
+        sta seed
+        jmp gen_add_end
+gen_add_seed
+        inc toggle
+        clc
+        lda modifier
+        adc #3
+        sta modifier
+gen_add_end
+        ldx #2
+        lda seed
+gen_test_pre                 
+        clc
+        adc modifier
+        dex
+        bpl gen_test_pre
+        ldx #127
+gen_test_pat
+        sta pattern,x
+        clc
+        adc modifier
+        dex
+        bpl gen_test_pat
+        rts
+
+init    inc sm_init     ;initialize seed & modifier
+        bne init
+        inc sm_init+1
+        jmp init        ;AP1000 to start test
+
+nmi_trap
+        jmp *           ;no NMI expected
+        
+irq_handler
+        jmp *           ;no IRQ expected
+
+; take a subprocessor dump ->$400-$7ff
+; set PC to dump_ios and start
+dump_ios
+        sei
+        lda #is_sreg        ;override safety lock
+        sta ios_aad
+        lda #isc_diaga      ;start diag
+        sta ios_cr
+        ldx #0              ;address from 0
+        stx ios_dr
+        stx ios_dr
+        lda #4              ;set buffer address $400
+        sta dump_ptr
+dump_loop
+        lda ios_dr
+dump_ptr = *+2
+        sta $400,x
+        inx                 ;for 256 bytes
+        bne dump_loop
+        inc dump_ptr
+        lda dump_ptr
+        cmp #8              ;4 * 256
+        bne dump_loop
+        db  $db             ;stop        
+
+        org $fffa       ;vectors
+        dw  nmi_trap
+        dw  init        ;restart on reset
+        dw  irq_handler
+
+        end init
+
+       

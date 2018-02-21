@@ -1,0 +1,160 @@
+; Internal EEPROM test writing 512 bytes test pattern once,
+; reading the pattern indefinitely.
+; INIT randomizes pattern, AP1000 to start test
+iomap   equ $bf00       ;I/O page (A15:8)
+; IO subprocessor (ATMega16)
+ios_    equ iomap+$70   ;base address of the IO subprocessor
+ios_r0  equ ios_        ;IO register @ ios_adr, read/write
+ios_r1  equ ios_+1      ;IO register @ ios_adr+1, read/write
+ios_r2  equ ios_+2      ;IO register @ ios_adr+2, read/write
+ios_adr equ ios_+3      ;IO register address, write only
+ios_vec equ ios_+3      ;IRQ vector register, read only
+ios_ar  equ ios_+4      ;alternate IO register @ ios_aad, read/write
+ios_aad equ ios_+5      ;alternate IO register address, write only
+                        ;registers below apply to SPI, TWI & USART only
+                        ;their function depends on the current IRQ vector
+                        ;or the current programmed IO command
+ios_sr  equ ios_+5      ;status register, read only
+ios_dr  equ ios_+6      ;data register, read/write
+ios_xr  equ ios_+7      ;extra register, read/write
+
+        nolist
+        include "m16def.i65"
+        list
+        
+        bss
+        org 0
+sm_init     ds  2       ;seed & modifier init
+cur_adr     ds  2       ;current address in EEPROM
+seed        ds  1       ;test pattern seed & modifier
+modifier    ds  1
+toggle      ds  1
+        org $200
+read        ds  128     ;readback pattern
+pattern     ds  128     ;generated pattern
+
+              
+        code
+
+        org $1000
+
+start   
+        jsr reset_seed
+write128
+        jsr gen_pattern
+        lda #$41        ;eep start
+        sta ios_xr
+        lda cur_adr     ;write address low
+        sta ios_dr
+        lda cur_adr+1   ;write address low
+        sta ios_dr
+        ldx #127
+write1
+        lda pattern,x   ;write pattern
+        sta ios_dr
+        dex
+        bpl write1
+        lda cur_adr     ;address = next 128
+        clc
+        adc #128        
+        sta cur_adr
+        bcc write128
+        inc cur_adr+1
+        lda cur_adr+1
+        cmp #2
+        bne write128
+readall
+        jsr reset_seed
+read128
+        jsr gen_pattern
+        lda #$41        ;eep start
+        sta ios_xr
+        lda cur_adr     ;write address low
+        sta ios_dr
+        lda cur_adr+1   ;write  address high
+        sta ios_dr
+        ldx #127
+read1
+        lda ios_dr      ;read pattern
+        sta read,x
+        dex
+        bpl read1
+        ldx #127
+verify1 
+        lda pattern,x
+        cmp read,x
+        bne *           ;trap for miscompare
+        dex
+        bpl verify1
+        lda cur_adr     ;address = next 128
+        clc
+        adc #128
+        sta cur_adr
+        bcc read128
+        inc cur_adr+1
+        lda cur_adr+1
+        cmp #2
+        bne read128
+        beq readall     ;loop indefinitely
+
+reset_seed
+        lda #0
+rs_seed sta cur_adr     ;reset seed & current address
+        sta cur_adr+1
+        sta toggle
+        lda sm_init
+        sta seed
+        lda sm_init+1
+        sta modifier
+        rts
+
+gen_pattern                 ;generate test pattern
+        lda toggle          ;seed or modifier
+        bmi gen_add_seed
+        dec toggle
+        clc
+        lda seed
+        adc #5
+        sta seed
+        jmp gen_add_end
+gen_add_seed
+        inc toggle
+        clc
+        lda modifier
+        adc #3
+        sta modifier
+gen_add_end
+        ldx #2
+        lda seed
+gen_test_pre                 
+        clc
+        adc modifier
+        dex
+        bpl gen_test_pre
+        ldx #127
+gen_test_pat
+        sta pattern,x
+        clc
+        adc modifier
+        dex
+        bpl gen_test_pat
+        rts
+
+init    inc sm_init     ;initialize seed & modifier
+        bne init
+        inc sm_init+1
+        jmp init        ;AP1000 to start test
+
+nmi_trap
+        jmp *           ;no NMI expected
+        
+irq_handler
+        jmp *           ;no IRQ expected
+
+        org $fffa       ;vectors
+        dw  nmi_trap
+        dw  init        ;restart on reset
+        dw  irq_handler
+        
+        end init
+       

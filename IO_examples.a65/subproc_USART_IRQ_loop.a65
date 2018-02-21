@@ -1,0 +1,209 @@
+iomap   equ $bf00       ;I/O page (A15:8)
+; IO subprocessor (ATMega16)
+ios_    equ iomap+$70   ;base address of the IO subprocessor
+ios_r0  equ ios_        ;IO register @ ios_adr, read/write
+ios_r1  equ ios_+1      ;IO register @ ios_adr+1, read/write
+ios_r2  equ ios_+2      ;IO register @ ios_adr+2, read/write
+ios_adr equ ios_+3      ;IO register address, write only
+ios_vec equ ios_+3      ;IRQ vector register, read only
+ios_ar  equ ios_+4      ;alternate IO register @ ios_aad, read/write
+ios_aad equ ios_+5      ;alternate IO register address, write only
+                        ;registers below apply to SPI, TWI & USART only
+ios_sr  equ ios_+5      ;status register for pending IRQ, read only
+ios_dr  equ ios_+6      ;data register for pending IRQ, read/write
+ios_xr  equ ios_+7      ;extra register for pending IRQ, see docs
+
+        nolist
+        include "m16def.i65"
+        list
+        
+        bss
+        org 0
+seed        ds  1
+modifier    ds  1
+rxx         ds  1
+txx         ds  1
+        org $20
+pattern     ds  16
+            ds  3       ;diffusor space
+        org $40
+read        ds  16
+
+        code        
+        org $1000
+
+start
+;        lda ios_vec         ;reset sequence
+;        bne start
+;        lda #is_wdtcr+$20
+;        sta ios_aad
+;        lda #'r'
+;        sta ios_xr
+        lda #is_ocr2        ;init T2 1ms
+        sta ios_adr
+        lda #$f9
+        sta ios_r0
+        lda #(1<<is_wgm21|1<<is_cs22)
+        sta ios_r2          ;tccr2 = ctc, clk/64
+        lda #is_timsk
+        sta ios_adr
+        lda #(1<<is_ocie2)
+        sta ios_r0          ;enable oc2 interrupt
+        lda #is_ubrrl       ;init USART
+        sta ios_adr
+        lda #$19            ;38400 Baud
+        sta ios_r0
+        lda #is_ucsrb       ;ios_r2 = UDR
+        sta ios_adr
+        lda #$ff            ;all USART interrupts invalid
+        sta rxx
+        sta txx
+        cli
+        lda #0
+        sta seed
+        sta modifier
+        
+inc_test                    ;generate test pattern
+        ldx #2
+        lda seed
+inc_test_pre                 
+        clc
+        adc modifier
+        dex
+        bpl inc_test_pre
+        ldx #15
+inc_test_pat
+        sta pattern,x
+        clc
+        adc modifier
+        dex
+        bpl inc_test_pat
+        jsr verify
+        inc modifier
+        bne inc_test
+        inc seed
+        bne inc_test
+
+
+inc_xor                     ;generate pattern with inversion
+        ldx #2
+        lda seed
+inc_xor_pre                 
+        clc
+        adc modifier
+        dex
+        bpl inc_xor_pre
+        ldx #15
+inc_xor_pat
+        sta pattern,x
+        clc
+        adc modifier
+        dex
+        eor #$ff
+        sta pattern,x
+        eor #$ff
+        clc
+        adc modifier
+        dex
+        bpl inc_xor_pat
+        jsr verify
+        inc modifier
+        bne inc_xor
+        inc seed
+        bne inc_xor
+
+        jmp start        
+
+verify  ldx #15             ;sub write - read - verify
+        stx rxx
+        stx txx
+        ;enable USART & interrupts
+        lda #(1<<is_rxcie|1<<is_udrie|1<<is_rxen|1<<is_txen)
+        sta ios_r0
+wr_tx   ldx txx             ;wait tx
+        bpl wr_tx
+wr_rx   ldx rxx             ;wait rx
+        bpl wr_rx
+
+        ldx #15             ;compare read to lastpat
+cp_loop lda pattern,x
+        cmp read,x
+        bne *
+        dex
+        bpl cp_loop
+        rts        
+
+nmi_trap
+        jmp *           ;no NMI expected
+        
+irq_handler
+        pha
+        txa
+        pha
+        lda ios_vec
+        cmp #isv_urxc   ;USART receive complete?
+        beq irq_urxc
+        cmp #isv_udre   ;USART data register empty?
+        beq irq_udre
+        cmp #isv_oc2    ;T2 compare match
+        beq irq_oc2
+        bne *           ;unexpected IRQ vector
+irq_urxc
+        lda ios_sr
+        and #(1<<is_fe|1<<is_dor|1<<is_upe)
+        bne *           ;any rx error
+        ldx rxx         ;load rx index
+        bmi *           ;unexpected rxc
+        bne irq_rx1
+        lda ios_xr      ;last byte
+        jmp irq_rx2
+irq_rx1 lda ios_dr
+irq_rx2 sta read,x
+        dex
+        stx rxx
+        pla
+        tax
+        pla
+        rti
+irq_udre
+        ldx txx         ;load tx index
+        bmi *           ;unexpected udre
+        lda pattern,x
+        dex
+        bpl irq_tx1
+        sta ios_xr      ;last byte
+        bmi irq_tx2
+irq_tx1 sta ios_dr
+irq_tx2 stx txx
+        pla
+        tax
+        pla
+        rti
+irq_oc2 
+        sta ios_dr      ;end timer interrupt
+        iny
+        pla
+        tax
+        pla
+        rti
+        
+        org $1200
+        ldx #0          ;read the trace table
+skip_irq
+        lda ios_vec
+        bne skip_irq
+read_ior
+        lda ios_xr
+        sta $200,x
+        inx
+        bne read_ior
+        db  0xdb
+
+        org $fffa       ;vectors
+        dw  nmi_trap
+        dw  start       ;restart on reset
+        dw  irq_handler
+        
+        end start
+        
+        
